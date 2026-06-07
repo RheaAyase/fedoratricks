@@ -21,7 +21,7 @@ EOF
 }
 
 # Always define option defaults:
-current=true
+current=false
 lastboot=false
 dmesg=false
 datetime=$(date '+%Y-%m-%d_%H-%M-%S');
@@ -64,13 +64,20 @@ logsExecute() {
   done
 
   # DO STUFF
+  if [[ ${dmesg} == false && ${lastboot} == false ]]; then
+    current=true
+  fi
+
   if [[ ${dmesg} == true ]]; then
-    sudo dmesg -H &> ${path}/dmesg_${datetime}.log
+    echo "$ sudo dmesg -H &> ${path}/dmesg_${datetime}.log"
+    pkexec dmesg -H &> ${path}/dmesg_${datetime}.log
   fi
   if [[ ${current} == true ]] ; then
+    echo "$ journalctl -b 0 &> ${path}/current_${datetime}.log"
     journalctl -b 0 &> ${path}/current_${datetime}.log
   fi
   if [[ ${lastboot} == true ]] ; then
+    echo "$ journalctl -b -1 &> ${path}/lastboot_${datetime}.log"
     journalctl -b -1 &> ${path}/lastboot_${datetime}.log
   fi
   echo "Saved support logs to ${path}"
