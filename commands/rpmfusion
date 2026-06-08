@@ -1,0 +1,71 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+cleanup() {
+  rpmfusionCleanup
+}
+
+
+rpmfusionHelp() {
+  cat <<EOF
+Command Usage: fedoratricks rpmfusion [options]
+
+Options:
+-h|--help    Print the help text and exit.
+enable       Enable the RPMFusion repository.
+disable      Disable the RPMFusion repository.
+EOF
+}
+
+# Always define option defaults:
+executeValue="skip"
+
+rpmfusionExecute() {
+  echo "Executing RPMFusion"
+
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      enable)
+        executeValue="enable"
+        shift
+        ;;
+      disable)
+        executeValue="disable"
+        shift
+        ;;
+      *)
+        echo "Unknown option $1"
+        exit 1
+        ;;
+    esac
+  done
+
+  # DO STUFF
+  if [[ $executeValue = "enable" ]]; then
+	  cat <<EOF
+$ sudo dnf install \ 
+https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \ 
+https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm \ 
+&& \ 
+sudo dnf config-manager setopt fedora-cisco-openh264.enabled=1 \ 
+sudo dnf update @core \ 
+sudo dnf install rpmfusion-\*-appstream-data
+EOF
+    pkexec dnf install \
+    https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
+    https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
+    pkexec dnf config-manager setopt fedora-cisco-openh264.enabled=1
+    pkexec dnf update @core
+    pkexec dnf install rpmfusion-\*-appstream-data
+  fi
+  if [[ $executeValue = "disable" ]]; then
+	  echo "disable rpmfusion"
+  fi
+
+}
+
+rpmfusionCleanup() {
+  # Triggered automatically in case of an unexpected error.
+  echo "Cleaned up after RPMFusion"
+  exit 2
+}
