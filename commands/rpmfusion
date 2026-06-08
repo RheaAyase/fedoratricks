@@ -14,11 +14,12 @@ Options:
 -h|--help    Print the help text and exit.
 enable       Enable the RPMFusion repository.
 disable      Disable the RPMFusion repository.
+status       View the installation status of the RPMFusion repository.
 EOF
 }
 
 # Always define option defaults:
-executeValue="skip"
+executeValue="status"
 
 rpmfusionExecute() {
   echo "Executing RPMFusion"
@@ -31,6 +32,10 @@ rpmfusionExecute() {
         ;;
       disable)
         executeValue="disable"
+        shift
+        ;;
+      status)
+        executeValue="status"
         shift
         ;;
       *)
@@ -60,6 +65,12 @@ EOF
   fi
   if [[ $executeValue = "disable" ]]; then
 	  echo "disable rpmfusion"
+  fi
+  if [[ $executeValue = "status" ]]; then
+	  echo "Listing installed RPMFusion repositories:"
+    echo "$ sudo dnf repo list | grep rpmfusion"
+    repo_list="$(pkexec dnf repo list | grep rpmfusion)"
+    echo "$repo_list"
   fi
 
 }
