@@ -47,7 +47,26 @@ rpmfusionExecute() {
 
   # DO STUFF
   if [[ $executeValue = "enable" ]]; then
-	  cat <<EOF
+    if [[ $(grep rpmfusion-free /etc/dnf/repos.override.d/99-config_manager.repo -c) -gt 0 ]] then
+      enable_soft
+    else
+      enable_install
+    fi
+  fi
+  if [[ $executeValue = "disable" ]]; then
+	  disable
+  fi
+  if [[ $executeValue = "status" ]]; then
+	  echo "Listing installed RPMFusion repositories:"
+    echo "$ sudo dnf repo list | grep rpmfusion"
+    repo_list="$(pkexec dnf repo list | grep rpmfusion)"
+    echo "$repo_list"
+  fi
+
+}
+
+enable_install() {
+  cat <<EOF
 $ sudo dnf install \ 
 	https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \ 
 	https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm \ 
@@ -62,26 +81,36 @@ EOF
     pkexec dnf config-manager setopt fedora-cisco-openh264.enabled=1
     pkexec dnf update @core
     pkexec dnf install rpmfusion-\*-appstream-data
-  fi
-  if [[ $executeValue = "disable" ]]; then
-	  cat <<EOF
-$ sudo dnf config-manager setopt \
-	rpmfusion-free.enabled=0 \
-	rpmfusion-nonfree.enabled=0 &&\
-	sudo dnf config-manager unsetopt\
+}
+
+enable_soft() {
+  cat <<EOF
+$ sudo dnf config-manager enable \ 
+	rpmfusion-free \ 
+	rpmfusion-free-updates \ 
+	rpmfusion-nonfree \ 
+	rpmfusion-nonfree-updates && \ 
+	sudo dnf config-manager unsetopt \ 
 	fedora-cisco-openh264.enabled
 EOF
-	pkexec config-manager unsetopt fedora-cisco-openh264.enabled
-	pkexec config-manager setopt rpmfusion-free.enabled=0 rpmfusion-nonfree.enabled=0
-  fi
-  if [[ $executeValue = "status" ]]; then
-	  echo "Listing installed RPMFusion repositories:"
-    echo "$ sudo dnf repo list | grep rpmfusion"
-    repo_list="$(pkexec dnf repo list | grep rpmfusion)"
-    echo "$repo_list"
-  fi
-
+	pkexec dnf config-manager setopt fedora-cisco-openh264.enabled=1
+	pkexec dnf config-manager enable rpmfusion-{free,nonfree} rpmfusion-{free,nonfree}-updates
 }
+
+disable() {
+  cat <<EOF
+$ sudo dnf config-manager disable \ 
+	rpmfusion-free \ 
+  rpmfusion-free-updates \ 
+	rpmfusion-nonfree \ 
+  rpmfusion-nonfree-updates && \ 
+	sudo dnf config-manager unsetopt \ 
+	fedora-cisco-openh264.enabled
+EOF
+	pkexec dnf config-manager unsetopt fedora-cisco-openh264.enabled
+	pkexec dnf config-manager disable rpmfusion-{free,nonfree} rpmfusion-{free,nonfree}-updates
+}
+
 
 rpmfusionCleanup() {
   # Triggered automatically in case of an unexpected error.
