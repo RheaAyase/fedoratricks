@@ -16,15 +16,17 @@ Do Stuff - todo
 
 
 Install or enable the RPMFusion Free and Nonfree repositories:
-`$ fedoratricks rpmfusion enable`
-
-
+```
+$ fedoratricks rpmfusion enable
+```
 Disable the RPMFusion Free and Nonfree repositories:
-`$ fedoratricks rpmfusion disable`
-
-
+```
+$ fedoratricks rpmfusion disable
+```
 List installed RPMFusion repositories
-`$ fedoratricks rpmfusion status`
+```
+$ fedoratricks rpmfusion status
+```
 
 # Contact
 
