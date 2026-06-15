@@ -14,6 +14,20 @@ $ sudo dnf install fedoratricks
 
 Do Stuff - todo
 
+
+Install or enable the RPMFusion Free and Nonfree repositories:
+```
+$ fedoratricks rpmfusion enable
+```
+Disable the RPMFusion Free and Nonfree repositories:
+```
+$ fedoratricks rpmfusion disable
+```
+List installed RPMFusion repositories
+```
+$ fedoratricks rpmfusion status
+```
+
 # Contact
 
 Find us on the [Fedora Discord](https://discord.gg/fedora)
