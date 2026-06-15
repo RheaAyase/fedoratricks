@@ -2,12 +2,12 @@
 
 set -Eeuo pipefail
 cleanup() {
-  rpmfusionCleanup
+	rpmfusionCleanup
 }
 
 
 rpmfusionHelp() {
-  cat <<EOF
+	cat <<EOF
 Command Usage: fedoratricks rpmfusion [options]
 
 Options:
@@ -22,51 +22,56 @@ EOF
 executeValue="status"
 
 rpmfusionExecute() {
-  echo "Executing RPMFusion"
+	echo "Executing RPMFusion"
 
-  while [[ $# -gt 0 ]]; do
-    case $1 in
-      enable)
-        executeValue="enable"
-        shift
-        ;;
-      disable)
-        executeValue="disable"
-        shift
-        ;;
-      status)
-        executeValue="status"
-        shift
-        ;;
-      *)
-        echo "Unknown option $1"
-        exit 1
-        ;;
-    esac
-  done
+	while [[ $# -gt 0 ]]; do
+		case $1 in
+			enable)
+				executeValue="enable"
+				shift
+				;;
+			disable)
+				executeValue="disable"
+				shift
+				;;
+			status)
+				executeValue="status"
+				shift
+				;;
+			*)
+				echo "Unknown option $1"
+				exit 1
+				;;
+		esac
+	done
 
   # DO STUFF
-  if [[ $executeValue = "enable" ]]; then
-    if [[ $(grep rpmfusion-free /etc/dnf/repos.override.d/99-config_manager.repo -c) -gt 0 ]] then
-      enable_soft
-    else
-      enable_install
-    fi
-  fi
-  if [[ $executeValue = "disable" ]]; then
-	  disable
-  fi
-  if [[ $executeValue = "status" ]]; then
-	  echo "Listing installed RPMFusion repositories:"
-    echo "$ sudo dnf repo list | grep rpmfusion"
-    repo_list="$(pkexec dnf repo list | grep rpmfusion)"
-    echo "$repo_list"
-  fi
+	if [[ $executeValue = "enable" ]]; then
+		if [[ $(grep rpmfusion-free /etc/dnf/repos.override.d/99-config_manager.repo -c) -gt 0 ]] then
+			enable_soft
+		else
+			enable_install
+		fi
+	fi
+	if [[ $executeValue = "disable" ]]; then
+		disable
+	fi
+	if [[ $executeValue = "status" ]]; then
+		echo "Listing installed RPMFusion repositories:"
+		echo "$ sudo dnf repo list | grep rpmfusion"
+		if repo_list="$(pkexec dnf repo list | grep rpmfusion)"; then
+			echo "$repo_list"
+		else
+			echo "$ echo \$?"
+			echo "1"
+			echo "No matches found."
+		fi
+	fi
 
 }
 
 enable_install() {
-  cat <<EOF
+	cat <<EOF
 $ sudo dnf install \ 
 	https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \ 
 	https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm \ 
@@ -75,16 +80,16 @@ $ sudo dnf install \
 	sudo dnf update @core && \ 
 	sudo dnf install rpmfusion-\*-appstream-data
 EOF
-    pkexec dnf install \
-    https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
-    https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
-    pkexec dnf config-manager setopt fedora-cisco-openh264.enabled=1
-    pkexec dnf update @core
-    pkexec dnf install rpmfusion-\*-appstream-data
+	pkexec dnf install \
+	https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
+	https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
+	pkexec dnf config-manager setopt fedora-cisco-openh264.enabled=1
+	pkexec dnf update @core
+	pkexec dnf install rpmfusion-\*-appstream-data
 }
 
 enable_soft() {
-  cat <<EOF
+	cat <<EOF
 $ sudo dnf config-manager enable \ 
 	rpmfusion-free \ 
 	rpmfusion-free-updates \ 
@@ -101,9 +106,9 @@ disable() {
   cat <<EOF
 $ sudo dnf config-manager disable \ 
 	rpmfusion-free \ 
-  rpmfusion-free-updates \ 
+	rpmfusion-free-updates \ 
 	rpmfusion-nonfree \ 
-  rpmfusion-nonfree-updates && \ 
+	rpmfusion-nonfree-updates && \ 
 	sudo dnf config-manager unsetopt \ 
 	fedora-cisco-openh264.enabled
 EOF
@@ -113,7 +118,8 @@ EOF
 
 
 rpmfusionCleanup() {
-  # Triggered automatically in case of an unexpected error.
-  echo "Cleaned up after RPMFusion"
-  exit 2
+	# Triggered automatically in case of an unexpected error.
+	echo "Cleaned up after RPMFusion"
+	echo "Tried to do $executeValue and failed."
+	exit 2
 }
