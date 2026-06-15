@@ -62,8 +62,6 @@ rpmfusionExecute() {
 		if repo_list="$(pkexec dnf repo list | grep rpmfusion)"; then
 			echo "$repo_list"
 		else
-			echo "$ echo \$?"
-			echo "1"
 			echo "No matches found."
 		fi
 	fi
