@@ -1,0 +1,338 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+
+cleanup() {
+    codecsCleanup
+}
+
+codecsHelp() {
+    cat << EOF
+Command Usage: fedoratricks codecs [options] [vendor...]
+
+Note: This command modifies system packages and requires root privileges.
+OSTree-based systems (Silverblue/Kinoite) are not supported.
+
+Options:
+  -h|--help      Print the help text and exit.
+  -i|--install   Install codecs and apply configurations.
+  -r|--remove    Remove installed codecs and revert configurations.
+  --pre-skylake  (Intel only) Override detection: CPU is before Skylake.
+  --skylake      (Intel only) Override detection: CPU is Skylake or newer.
+  --tigerlake    (Intel only) Override detection: CPU is Tigerlake or newer.
+
+Vendors (Targets):
+  intel          Target Intel GPUs (Auto-detects CPU generation).
+  amd            Target AMD GPUs.
+  nvidia         Target Nvidia GPUs.
+
+Examples:
+  fedoratricks codecs -i amd
+  fedoratricks codecs -i intel amd --tigerlake
+  fedoratricks codecs -r nvidia
+EOF
+}
+
+# Always define option defaults:
+action=""
+vendors=()
+intel_gen=""
+
+check_rpmfusion() {
+    printf "Verifying RPM Fusion repositories...\n"
+    local active_repos
+
+    if ! active_repos=$(dnf repolist --enabled 2> /dev/null); then
+        printf "Error: Failed to fetch dnf repolist.\n" >&2
+        exit 1
+    fi
+
+    local missing=false
+    if ! grep -qi "rpmfusion-free" <<< "${active_repos}"; then
+        missing=true
+    fi
+    if ! grep -qi "rpmfusion-nonfree" <<< "${active_repos}"; then
+        missing=true
+    fi
+
+    if [[ ${missing} == true ]]; then
+        printf "\nError: RPM Fusion (Free & Non-Free) repositories are required but not enabled.\n" >&2
+        printf "Please install and enable them first by running:\n\n" >&2
+        printf "  sudo fedoratricks rpmfusion -i\n\n" >&2
+        exit 1
+    fi
+}
+
+detect_intel_gen() {
+    printf "Detecting Intel CPU generation:\n"
+
+    local model_name=""
+    if ! model_name=$(grep -m 1 -i 'model name' /proc/cpuinfo | cut -d ':' -f 2 | xargs); then
+        printf "Error: Failed to read processor information from /proc/cpuinfo.\n" >&2
+        exit 1
+    fi
+
+    printf "  Target CPU: %s\n" "${model_name}"
+
+    if grep -qi "Core Ultra" <<< "${model_name}"; then
+        intel_gen="tigerlake"
+    elif [[ ${model_name} =~ [iI][3579]-([0-9]{3,5}) ]]; then
+        local num="${BASH_REMATCH[1]}"
+        local len="${#num}"
+
+        if ((len == 3)); then
+            intel_gen="pre-skylake"
+            sudo fedoratricks rpmfusion -i
+
+       elif ((len == 4)); then
+            local gen="${num:0:1}"
+            if ((gen < 6)); then
+                intel_gen="pre-skylake"
+            else
+                intel_gen="skylake"
+            fi
+        elif ((len == 5)); then
+            local gen="${num:0:2}"
+            if ((gen >= 11)); then
+                intel_gen="tigerlake"
+            else
+                intel_gen="unknown"
+            fi
+        fi
+    else
+        intel_gen="unknown"
+    fi
+
+    if [[ ${intel_gen} == "unknown" ]]; then
+        printf "Error: Could not automatically determine Intel CPU generation family.\n" >&2
+        printf "Please specify manually using --pre-skylake, --skylake, or --tigerlake.\n" >&2
+        exit 1
+    fi
+
+    printf "  Detected family: %s\n" "${intel_gen}"
+}
+
+regenerate_initramfs() {
+    printf "Rebuilding initramfs image:\n"
+    if command -v dracut > /dev/null 2>&1; then
+        dracut --force || printf "Warning: dracut encountered an error.\n" >&2
+    elif [[ -x "/usr/bin/dracut" ]]; then
+        /usr/bin/dracut --force || printf "Warning: dracut encountered an error.\n" >&2
+    elif [[ -x "/usr/sbin/dracut" ]]; then
+        /usr/sbin/dracut --force || printf "Warning: dracut encountered an error.\n" >&2
+    else
+        printf "Warning: 'dracut' command not found. Initramfs not updated.\n" >&2
+    fi
+}
+
+codecsExecute() {
+    printf "Executing <codecs>\n"
+
+    if [[ ! -f "/etc/fedora-release" ]]; then
+        printf "Error: This command is intended for Fedora Linux only.\n" >&2
+        exit 1
+    fi
+
+    if [[ -d "/run/ostree-booted" ]]; then
+        printf "Error: OSTree-based systems are not supported.\n" >&2
+        exit 1
+    fi
+
+    if ! command -v dnf > /dev/null 2>&1; then
+        printf "Error: 'dnf' package manager not found.\n" >&2
+        exit 1
+    fi
+
+    if [[ ${EUID} -ne 0 ]]; then
+        printf "Error: Please run this command as root (e.g., sudo fedoratricks codecs -i intel).\n" >&2
+        exit 1
+    fi
+
+    if [[ $# -eq 0 ]]; then
+        codecsHelp
+        exit 1
+    fi
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h | --help)
+                codecsHelp
+                exit 0
+                ;;
+            -i | --install)
+                if [[ -n ${action} && ${action} != "install" ]]; then
+                    printf "Error: Conflicting actions specified ('%s' and 'install').\n" "${action}" >&2
+                    exit 1
+                fi
+                action="install"
+                shift
+                ;;
+            -r | --remove)
+                if [[ -n ${action} && ${action} != "remove" ]]; then
+                    printf "Error: Conflicting actions specified ('%s' and 'remove').\n" "${action}" >&2
+                    exit 1
+                fi
+                action="remove"
+                shift
+                ;;
+            --pre-skylake)
+                intel_gen="pre-skylake"
+                shift
+                ;;
+            --skylake)
+                intel_gen="skylake"
+                shift
+                ;;
+            --tigerlake)
+                intel_gen="tigerlake"
+                shift
+                ;;
+            intel | amd | nvidia)
+                vendors+=("$1")
+                shift
+                ;;
+            *)
+                if [[ $1 == -* ]]; then
+                    printf "Unknown option: %s\n" "$1" >&2
+                    exit 1
+                else
+                    printf "Unknown argument or vendor: '%s'. Supported vendors: intel, amd, nvidia.\n" "$1" >&2
+                    exit 1
+                fi
+                ;;
+        esac
+    done
+
+    if [[ -z ${action} ]]; then
+        printf "Error: No action specified. Use -i|--install or -r|--remove.\n" >&2
+        exit 1
+    fi
+
+    if [[ ${#vendors[@]} -eq 0 ]]; then
+        printf "Error: Please specify at least one vendor to target (intel, amd, nvidia).\n" >&2
+        exit 1
+    fi
+
+    # Block installation if RPM Fusion is missing
+    if [[ ${action} == "install" ]]; then
+        check_rpmfusion
+    fi
+
+    local base_codecs=(
+        sox
+        sox-plugins-nonfree
+        svt-av1
+        gstreamer1-svt-av1
+        gstreamer1-svt-vp9
+        svt-vp9
+        libheif
+        libheif-freeworld
+        rav1e
+        dav1d
+        vkd3d-compiler
+    )
+
+    local nvidia_extras=(
+        libva-nvidia-driver
+        libva-utils
+        vdpauinfo
+        nvidia-query-resource-opengl
+        nvidia-texture-tools
+        freeglut-devel
+        libX11-devel
+        libXi-devel
+        libXmu-devel
+        make
+        mesa-libGLU-devel
+        freeimage-devel
+        glfw
+    )
+
+    local has_intel=false
+    local check_vendor
+    for check_vendor in "${vendors[@]}"; do
+        if [[ ${check_vendor} == "intel" ]]; then
+            has_intel=true
+            break
+        fi
+    done
+
+    if [[ ${has_intel} == true && -z ${intel_gen} ]]; then
+        detect_intel_gen
+    fi
+
+    # DO STUFF
+    local vendor
+    for vendor in "${vendors[@]}"; do
+        if [[ ${action} == "remove" ]]; then
+            printf "\nReverting codecs configuration for %s:\n" "${vendor}"
+
+            if [[ ${vendor} == "intel" ]]; then
+                if [[ ${intel_gen} == "pre-skylake" ]]; then
+                    dnf remove -y "${base_codecs[@]}" libva-intel-driver || true
+                elif [[ ${intel_gen} =~ ^(skylake|tigerlake)$ ]]; then
+                    local intel_pkgs=(intel-media-driver)
+                    if [[ ${intel_gen} == "tigerlake" ]]; then
+                        intel_pkgs+=(intel-vpl-gpu-rt)
+                    fi
+
+                    dnf remove -y "${base_codecs[@]}" "${intel_pkgs[@]}" || true
+
+                    printf "Reverting Intel modprobe configurations:\n"
+                    if [[ -f "/etc/modprobe.d/i915.conf" ]]; then
+                        sed -i '/options i915 enable_guc/d' /etc/modprobe.d/i915.conf
+                        sed -i '/options i915 enable_fbc/d' /etc/modprobe.d/i915.conf
+                        if [[ ! -s "/etc/modprobe.d/i915.conf" ]]; then
+                            rm -f /etc/modprobe.d/i915.conf
+                        fi
+                    fi
+                    regenerate_initramfs
+                fi
+            elif [[ ${vendor} == "amd" ]]; then
+                dnf remove -y "${base_codecs[@]}" || true
+                printf "Reverting mesa drivers:\n"
+                dnf swap -y mesa-va-drivers-freeworld mesa-va-drivers --skip-unavailable || printf "Warning: mesa-va swap skipped.\n" >&2
+                dnf swap -y mesa-vdpau-drivers-freeworld mesa-vdpau-drivers --skip-unavailable || printf "Warning: mesa-vdpau swap skipped.\n" >&2
+            elif [[ ${vendor} == "nvidia" ]]; then
+                dnf remove -y "${base_codecs[@]}" "${nvidia_extras[@]}" || true
+            fi
+
+        elif [[ ${action} == "install" ]]; then
+            printf "\nApplying codecs configuration for %s:\n" "${vendor}"
+
+            if [[ ${vendor} == "intel" ]]; then
+                if [[ ${intel_gen} == "pre-skylake" ]]; then
+                    dnf install -y "${base_codecs[@]}" libva-intel-driver --skip-unavailable
+                elif [[ ${intel_gen} =~ ^(skylake|tigerlake)$ ]]; then
+                    local intel_pkgs=(intel-media-driver)
+                    local guc_ver="2"
+
+                    if [[ ${intel_gen} == "tigerlake" ]]; then
+                        intel_pkgs+=(intel-vpl-gpu-rt)
+                        guc_ver="3"
+                    fi
+
+                    dnf install -y "${base_codecs[@]}" "${intel_pkgs[@]}" --skip-unavailable
+                    printf "Configuring Intel hardware acceleration modules:\n"
+                    printf "options i915 enable_guc=%s\n" "${guc_ver}" > /etc/modprobe.d/i915.conf
+                    printf "options i915 enable_fbc=1\n" >> /etc/modprobe.d/i915.conf
+                    regenerate_initramfs
+                fi
+            elif [[ ${vendor} == "amd" ]]; then
+                dnf install -y "${base_codecs[@]}" --skip-unavailable
+                printf "Warning: Mesa packages in RPM Fusion can occasionally desync.\n"
+                dnf swap -y mesa-va-drivers mesa-va-drivers-freeworld --skip-unavailable || printf "Warning: mesa-va swap skipped.\n" >&2
+                dnf swap -y mesa-vdpau-drivers mesa-vdpau-drivers-freeworld --skip-unavailable || printf "Warning: mesa-vdpau swap skipped.\n" >&2
+            elif [[ ${vendor} == "nvidia" ]]; then
+                dnf install -y "${base_codecs[@]}" "${nvidia_extras[@]}" --skip-unavailable
+            fi
+        fi
+    done
+
+    printf "\nCodecs %s complete.\n" "${action}"
+}
+
+codecsCleanup() {
+    printf "Cleaned up after <codecs>\n"
+    exit 2
+}

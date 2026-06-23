@@ -3,7 +3,8 @@
 set -Eeuo pipefail
 trap cleanup SIGINT SIGTERM ERR
 
-COMMANDS=("template" "logs" "rpmfusion")
+# The master list of all available fedoratricks modules
+COMMANDS=("template" "logs" "codecs" "rpmfusion" "secureboot" "nvidiadrivers" "test")
 
 COMMAND_DIR="$(rpm -E %{_datarootdir})/fedoratricks"
 if [[ $(readlink -f -- "$0") == *"${HOME}"* ]]; then
@@ -11,12 +12,13 @@ if [[ $(readlink -f -- "$0") == *"${HOME}"* ]]; then
   echo "Using user directory, this is for development purposes only:"
   echo "${COMMAND_DIR}"
 fi
-if [[ ! -d ${COMMAND_DIR} ]]; then
+if [[ ! -d "${COMMAND_DIR}" ]]; then
   echo "Plugins not found in: ${COMMAND_DIR}"
 fi
 
 args=()
 
+# Source all command modules
 for cmd in "${COMMANDS[@]}" ; do
   source "${COMMAND_DIR}/${cmd}"
 done
@@ -33,13 +35,13 @@ Available commands:
 EOF
 
   for cmd in "${COMMANDS[@]}" ; do
-    echo "$cmd"
+    echo "  ${cmd}"
   done
 
   if [[ ${#args[@]} != 0 ]]; then
     echo ""
 
-    if [[ ! ${COMMANDS[*]} =~ ${args[0]} ]]; then
+    if [[ ! " ${COMMANDS[*]} " =~ " ${args[0]} " ]]; then
       echo "Unknown command: ${args[0]}"
       exit 1
     fi
@@ -48,8 +50,9 @@ EOF
   fi
 }
 
+# Parse global arguments
 while [[ $# -gt 0 ]]; do
-  case $1 in
+  case "$1" in
     -h|--help)
       help
       exit 0
@@ -74,11 +77,12 @@ if [[ ${#args[@]} == 0 ]]; then
   exit 1
 fi
 
-if [[ ! ${COMMANDS[*]} =~ ${args[0]} ]]; then
-  echo Unknown command.
+if [[ ! " ${COMMANDS[*]} " =~ " ${args[0]} " ]]; then
+  echo "Unknown command: ${args[0]}"
   exit 1
 fi
 
+# Execute the specific module and pass all remaining arguments to it
 ${args[0]}Execute "${args[@]:1}"
 
 cleanup() {
@@ -86,11 +90,10 @@ cleanup() {
   if [[ ${#args[@]} != 0 ]]; then
     echo ""
 
-    if [[ ! ${COMMANDS[*]} =~ ${args[0]} ]]; then
+    if [[ ! " ${COMMANDS[*]} " =~ " ${args[0]} " ]]; then
       ${args[0]}Cleanup
     fi
   fi
-
 }
 
 exit 0

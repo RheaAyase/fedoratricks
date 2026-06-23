@@ -1,0 +1,148 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+
+cleanup() {
+    securebootCleanup
+}
+
+securebootHelp() {
+    cat << EOF
+Command Usage: fedoratricks secureboot [options]
+
+Note: This command configures Machine Owner Keys (MOK) for Secure Boot.
+It requires root privileges. OSTree-based systems are currently not supported.
+
+Options:
+  -h|--help      Print the help text and exit.
+  -e|--enable    Generate and import a custom MOK for third-party drivers.
+  -d|--disable   Revoke the custom MOK from the system.
+
+Examples:
+  fedoratricks secureboot -e
+  fedoratricks secureboot -d
+EOF
+}
+
+# Always define option defaults:
+action=""
+
+securebootExecute() {
+    printf "Executing <secureboot>\n"
+
+    if [[ ! -f "/etc/fedora-release" ]]; then
+        printf "Error: This command is intended for Fedora Linux only.\n" >&2
+        exit 1
+    fi
+
+    if [[ -d "/run/ostree-booted" ]]; then
+        printf "Error: OSTree-based systems are not currently supported for this command.\n" >&2
+        exit 1
+    fi
+
+    if ! command -v dnf > /dev/null 2>&1; then
+        printf "Error: 'dnf' package manager not found.\n" >&2
+        exit 1
+    fi
+
+    if [[ ${EUID} -ne 0 ]]; then
+        printf "Error: Please run this command as root (e.g., sudo fedoratricks secureboot -e).\n" >&2
+        exit 1
+    fi
+
+    if [[ $# -eq 0 ]]; then
+        securebootHelp
+        exit 1
+    fi
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h | --help)
+                securebootHelp
+                exit 0
+                ;;
+            -e | --enable)
+                if [[ -n ${action} && ${action} != "enable" ]]; then
+                    printf "Error: Conflicting actions specified ('%s' and 'enable').\n" "${action}" >&2
+                    exit 1
+                fi
+                action="enable"
+                shift
+                ;;
+            -d | --disable)
+                if [[ -n ${action} && ${action} != "disable" ]]; then
+                    printf "Error: Conflicting actions specified ('%s' and 'disable').\n" "${action}" >&2
+                    exit 1
+                fi
+                action="disable"
+                shift
+                ;;
+            *)
+                if [[ $1 == -* ]]; then
+                    printf "Unknown option: %s\n" "$1" >&2
+                    exit 1
+                else
+                    printf "Unknown argument: '%s'. Use -e to enable or -d to disable.\n" "$1" >&2
+                    exit 1
+                fi
+                ;;
+        esac
+    done
+
+    if [[ -z ${action} ]]; then
+        printf "Error: No action specified. Use -e|--enable or -d|--disable.\n" >&2
+        exit 1
+    fi
+
+    local cert_path="/etc/pki/akmods/certs/public_key.der"
+
+    # DO STUFF
+    if [[ ${action} == "enable" ]]; then
+        printf "\nEnabling Secure Boot custom key enrollment:\n"
+
+        printf "Installing required packages...\n"
+        dnf install -y kmodtool akmods mokutil openssl
+
+        printf "Generating AKMODs Machine Owner Key (MOK)...\n"
+        kmodgenca -a || true # We allow this to pass if the key already exists
+
+        if [[ ! -f ${cert_path} ]]; then
+            printf "Error: Certificate generation failed. Not found at %s\n" "${cert_path}" >&2
+            exit 1
+        fi
+
+        printf "\n============================================================\n"
+        printf " ATTENTION: You will now be prompted to create a password.\n"
+        printf " Remember this password! You will need to enter it on the\n"
+        printf " blue MOK management screen when you reboot your computer.\n"
+        printf "============================================================\n"
+
+        mokutil --import "${cert_path}"
+
+        printf "\nSecure Boot key staged successfully.\n"
+        printf "PLEASE REBOOT YOUR SYSTEM to complete the enrollment process.\n"
+
+    elif [[ ${action} == "disable" ]]; then
+        printf "\nDisabling (Revoking) Secure Boot custom key:\n"
+
+        if [[ -f ${cert_path} ]]; then
+            printf "\n============================================================\n"
+            printf " ATTENTION: You will now be prompted to enter a password.\n"
+            printf " Remember this password! You will need it to confirm the\n"
+            printf " revocation on the blue MOK screen when you reboot.\n"
+            printf "============================================================\n"
+
+            mokutil --revoke "${cert_path}" || printf "Warning: MOK revoke failed or was cancelled.\n" >&2
+
+            printf "\nSecure Boot key revocation staged.\n"
+            printf "PLEASE REBOOT YOUR SYSTEM to complete the process.\n"
+        else
+            printf "No custom key found at %s. Nothing to revoke.\n" "${cert_path}"
+        fi
+    fi
+}
+
+securebootCleanup() {
+    printf "Cleaned up after <secureboot>\n"
+    exit 2
+}

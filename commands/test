@@ -1,0 +1,332 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+
+cleanup() {
+    testCleanup
+}
+
+testHelp() {
+    cat << EOF
+Command Usage: fedoratricks test [options]
+
+Note: This command automatically detects your system's hardware and runs
+the fedoratricks modules to test end-to-end integration and compatibility.
+IT WILL MODIFY YOUR SYSTEM AND INSTALL PACKAGES. Requires root privileges.
+OSTree-based systems are currently not supported.
+
+Options:
+  -h|--help      Print the help text and exit.
+  -y|--yes       Skip the interactive confirmation prompt.
+  --auto         Auto-detect hardware and install all relevant modules sequentially.
+  --undo         Revert all installations and configurations made by --auto.
+  --skip <list>  Comma-separated list of modules to skip (e.g., secureboot,codecs).
+
+Examples:
+  fedoratricks test --auto --skip secureboot
+  fedoratricks test --auto --skip secureboot,codecs
+  fedoratricks test --undo -y
+EOF
+}
+
+# Define defaults
+action=""
+assume_yes=false
+skip_list=""
+
+testExecute() {
+    printf "Executing <test>\n"
+
+    if [[ ! -f "/etc/fedora-release" ]]; then
+        printf "Error: This command is intended for Fedora Linux only.\n" >&2
+        exit 1
+    fi
+
+    if [[ -d "/run/ostree-booted" ]]; then
+        printf "Error: OSTree-based systems are not supported for automated testing.\n" >&2
+        exit 1
+    fi
+
+    if [[ ${EUID} -ne 0 ]]; then
+        printf "Error: Please run this command as root (e.g., sudo fedoratricks test --auto).\n" >&2
+        exit 1
+    fi
+
+    if [[ $# -eq 0 ]]; then
+        testHelp
+        exit 1
+    fi
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h | --help)
+                testHelp
+                exit 0
+                ;;
+            -y | --yes)
+                assume_yes=true
+                shift
+                ;;
+            --auto)
+                action="auto"
+                shift
+                ;;
+            --undo)
+                action="undo"
+                shift
+                ;;
+            --skip)
+                skip_list="$2"
+                shift 2
+                ;;
+            *)
+                printf "Unknown option: '%s'. See --help.\n" "$1" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    if [[ -z ${action} ]]; then
+        printf "Error: Please specify --auto to test installation, or --undo to recover.\n" >&2
+        exit 1
+    fi
+
+    local divider="------------------------------------------------------------"
+    local thick_divider="============================================================"
+
+    # ---------------------------------------------------------
+    # SAFEGUARD PROMPT
+    # ---------------------------------------------------------
+    if [[ ${assume_yes} == false ]]; then
+        printf "\n"
+        printf "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+        printf " WARNING: SYSTEM MODIFICATION TEST INITIATED\n"
+        printf "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+        printf " This command is a developer integration suite. It will actively\n"
+        printf " modify your system by altering kernel parameters, installing\n"
+        printf " proprietary drivers, and configuring repositories.\n"
+        printf " \n"
+        printf " DO NOT run this simply to see what it does. Only proceed if\n"
+        printf " you are prepared to potentially troubleshoot your system.\n"
+        printf "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\n"
+
+        local response
+        if read -r -p " Are you absolutely sure you want to proceed? [y/N]: " response; then
+            if [[ ! ${response} =~ ^([yY][eE][sS]|[yY])$ ]]; then
+                printf "\nTest aborted by user.\n"
+                exit 0
+            fi
+        else
+            printf "\nTest aborted.\n"
+            exit 0
+        fi
+    fi
+
+    # Hardware Detection
+    local has_intel_gpu=false
+    local has_amd_gpu=false
+    local has_nvidia_gpu=false
+
+    printf "\nDetecting Hardware...\n"
+    local pci_info
+    pci_info=$(lspci | grep -i 'vga\|3d' 2> /dev/null || true)
+
+    if grep -qi 'intel' <<< "${pci_info}"; then
+        has_intel_gpu=true
+        printf "  [+] Detected Intel GPU\n"
+    fi
+    if grep -qi 'amd\|radeon\|advanced micro devices' <<< "${pci_info}"; then
+        has_amd_gpu=true
+        printf "  [+] Detected AMD GPU\n"
+    fi
+    if grep -qi 'nvidia' <<< "${pci_info}"; then
+        has_nvidia_gpu=true
+        printf "  [+] Detected NVIDIA GPU\n"
+    fi
+
+    local codec_vendors=()
+    if [[ ${has_intel_gpu} == true ]]; then codec_vendors+=("intel"); fi
+    if [[ ${has_amd_gpu} == true ]]; then codec_vendors+=("amd"); fi
+    if [[ ${has_nvidia_gpu} == true ]]; then codec_vendors+=("nvidia"); fi
+
+    # ---------------------------------------------------------
+    # GENERATE DYNAMIC QUEUE BASED ON HARDWARE & SKIP LIST
+    # ---------------------------------------------------------
+    local potential_modules=()
+    if [[ ${action} == "auto" ]]; then
+        potential_modules=("rpmfusion" "secureboot")
+        if [[ ${has_nvidia_gpu} == true ]]; then potential_modules+=("nvidiadrivers"); fi
+        if [[ ${#codec_vendors[@]} -gt 0 ]]; then potential_modules+=("codecs"); fi
+    else
+        # Undo runs in precise reverse dependency order
+        if [[ ${#codec_vendors[@]} -gt 0 ]]; then potential_modules+=("codecs"); fi
+        if [[ ${has_nvidia_gpu} == true ]]; then potential_modules+=("nvidiadrivers"); fi
+        potential_modules+=("secureboot" "rpmfusion")
+    fi
+
+    local active_modules=()
+    local skipped_names=()
+    local skipped=0
+
+    local mod
+    for mod in "${potential_modules[@]}"; do
+        if [[ ",${skip_list}," == *",${mod},"* ]]; then
+            skipped_names+=("${mod} (Explicitly skipped via CLI)")
+            skipped=$((skipped + 1))
+        else
+            active_modules+=("${mod}")
+        fi
+    done
+
+    # Add hardware structural skips to the summary list if running auto
+    if [[ ${action} == "auto" ]]; then
+        if [[ ${has_nvidia_gpu} == false && ",${skip_list}," != *",nvidiadrivers,"* ]]; then
+            skipped_names+=("nvidiadrivers (No Nvidia GPU present)")
+            skipped=$((skipped + 1))
+        fi
+        if [[ ${#codec_vendors[@]} -eq 0 && ",${skip_list}," != *",codecs,"* ]]; then
+            skipped_names+=("codecs (No supported media GPU present)")
+            skipped=$((skipped + 1))
+        fi
+    fi
+
+    local total_tests=${#active_modules[@]}
+    local current_test=1
+    local base_cmd="${0}"
+
+    local passed=0
+    local failed=0
+
+    local passed_names=()
+    local failed_names=()
+
+    # Helper function to run sub-commands safely without exiting the test runner
+    run_module() {
+        local mod_id="$1"
+        local task_name="$2"
+        shift 2
+
+        printf "\n%s\n" "${divider}"
+        printf " [%d/%d] RUNNING: %s\n" "${current_test}" "${total_tests}" "${task_name}"
+        printf " COMMAND: %s %s\n" "${base_cmd}" "$*"
+        printf "%s\n" "${divider}"
+
+        local exit_code=0
+        # Bypasses BOTH set -e and the global ERR trap
+        "${base_cmd}" "$@" || exit_code=$?
+
+        if [[ ${exit_code} -eq 0 ]]; then
+            passed_names+=("${task_name}")
+            passed=$((passed + 1))
+        else
+            failed_names+=("${task_name} (Exit Code: ${exit_code})")
+            failed=$((failed + 1))
+        fi
+
+        current_test=$((current_test + 1))
+    }
+
+    # ---------------------------------------------------------
+    # EXECUTION ENGINE
+    # ---------------------------------------------------------
+    printf "\n%s\n" "${thick_divider}"
+    if [[ ${action} == "auto" ]]; then
+        printf " FEDORATRICKS AUTO-INSTALL & COMPATIBILITY TEST\n"
+    else
+        printf " FEDORATRICKS RECOVERY & UNDO SEQUENCE\n"
+    fi
+    printf "%s\n" "${thick_divider}"
+
+    local run_target
+    for run_target in "${active_modules[@]}"; do
+        case "${run_target}" in
+            rpmfusion)
+                if [[ ${action} == "auto" ]]; then
+                    run_module "rpmfusion" "RPM Fusion Installation" rpmfusion -i
+                else
+                    run_module "rpmfusion" "RPM Fusion Removal" rpmfusion -r
+                fi
+                ;;
+            secureboot)
+                if [[ ${action} == "auto" ]]; then
+                    run_module "secureboot" "Secure Boot Enrollment" secureboot -e
+                else
+                    run_module "secureboot" "Secure Boot Revocation" secureboot -d
+                fi
+                ;;
+            nvidiadrivers)
+                if [[ ${action} == "auto" ]]; then
+                    run_module "nvidiadrivers" "NVIDIA Proprietary Drivers" nvidiadrivers -i --sleep enable
+                else
+                    run_module "nvidiadrivers" "NVIDIA Drivers Removal" nvidiadrivers -r
+                fi
+                ;;
+            codecs)
+                if [[ ${action} == "auto" ]]; then
+                    run_module "codecs" "Codecs Installation (${codec_vendors[*]})" codecs -i "${codec_vendors[@]}"
+                else
+                    run_module "codecs" "Codecs Removal (${codec_vendors[*]})" codecs -r "${codec_vendors[@]}"
+                fi
+                ;;
+        esac
+    done
+
+    # ---------------------------------------------------------
+    # FINAL SCORECARD SUMMARY
+    # ---------------------------------------------------------
+    printf "\n%s\n" "${thick_divider}"
+    if [[ ${action} == "auto" ]]; then
+        printf " AUTO-INSTALL SUMMARY\n"
+    else
+        printf " RECOVERY SUMMARY\n"
+    fi
+    printf "%s\n" "${thick_divider}"
+
+    printf "Total Modules Evaluated: %d\n\n" "$((total_tests + skipped))"
+
+    # Print Passed
+    printf "\e[32m[ PASSED ] (%d)\e[0m\n" "${passed}"
+    if [[ ${passed} -gt 0 ]]; then
+        for name in "${passed_names[@]}"; do
+            printf "  - %s\n" "${name}"
+        done
+    else
+        printf "  - None\n"
+    fi
+    printf "\n"
+
+    # Print Failed
+    printf "\e[31m[ FAILED ] (%d)\e[0m\n" "${failed}"
+    if [[ ${failed} -gt 0 ]]; then
+        for name in "${failed_names[@]}"; do
+            printf "  - %s\n" "${name}"
+        done
+    else
+        printf "  - None\n"
+    fi
+    printf "\n"
+
+    # Print Skipped
+    printf "\e[33m[ SKIPPED ] (%d)\e[0m\n" "${skipped}"
+    if [[ ${skipped} -gt 0 ]]; then
+        for name in "${skipped_names[@]}"; do
+            printf "  - %s\n" "${name}"
+        done
+    else
+        printf "  - None\n"
+    fi
+
+    printf "%s\n" "${thick_divider}"
+
+    if [[ ${failed} -gt 0 ]]; then
+        printf "\nWarning: Testing cycle finished with errors. Review logs above.\n"
+        exit 1
+    else
+        printf "\nSuccess: Sequence completed successfully!\n"
+    fi
+}
+
+testCleanup() {
+    printf "Cleaned up after <test>\n"
+    exit 2
+}

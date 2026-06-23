@@ -1,123 +1,193 @@
 #!/bin/bash
 
 set -Eeuo pipefail
+
 cleanup() {
-	rpmfusionCleanup
+    rpmfusionCleanup
 }
 
-
 rpmfusionHelp() {
-	cat <<EOF
+    cat << EOF
 Command Usage: fedoratricks rpmfusion [options]
 
+Note: This command requires root privileges.
+
 Options:
--h|--help    Print the help text and exit.
-enable       Enable the RPMFusion repository.
-disable      Disable the RPMFusion repository.
-status       View the installation status of the RPMFusion repository.
+  -h|--help      Print the help text and exit.
+  -i|--install   Install RPM Fusion (Free and Non-Free) repositories.
+  -r|--remove    Remove RPM Fusion repositories.
+  -e|--enable    Enable installed RPM Fusion repositories.
+  -d|--disable   Disable installed RPM Fusion repositories.
+
+Examples:
+  fedoratricks rpmfusion -i
+  fedoratricks rpmfusion -d
 EOF
 }
 
 # Always define option defaults:
-executeValue="status"
+action=""
 
 rpmfusionExecute() {
-	echo "Executing RPMFusion"
+    printf "Executing <rpmfusion>\n"
 
-	while [[ $# -gt 0 ]]; do
-		case $1 in
-			enable)
-				executeValue="enable"
-				shift
-				;;
-			disable)
-				executeValue="disable"
-				shift
-				;;
-			status)
-				executeValue="status"
-				shift
-				;;
-			*)
-				echo "Unknown option $1"
-				exit 1
-				;;
-		esac
-	done
+    if [[ ! -f "/etc/fedora-release" ]]; then
+        printf "Error: This command is intended for Fedora Linux only.\n" >&2
+        exit 1
+    fi
 
-  # DO STUFF
-	if [[ $executeValue = "enable" ]]; then
-		if [[ $(grep rpmfusion-free /etc/dnf/repos.override.d/99-config_manager.repo -c) -gt 0 ]] then
-			enable_soft
-		else
-			enable_install
-		fi
-	fi
-	if [[ $executeValue = "disable" ]]; then
-		disable
-	fi
-	if [[ $executeValue = "status" ]]; then
-		echo "Listing installed RPMFusion repositories:"
-		echo "$ sudo dnf repo list | grep rpmfusion"
-		if repo_list="$(pkexec dnf repo list | grep rpmfusion)"; then
-			echo "$repo_list"
-		else
-			echo "No matches found."
-		fi
-	fi
+    # Auto-detect if system is OSTree-based
+    local is_ostree=false
+    if [[ -d "/run/ostree-booted" ]]; then
+        is_ostree=true
+    fi
 
+    # Privilege check
+    if [[ ${EUID} -ne 0 ]]; then
+        printf "Error: Please run this command as root (e.g., sudo fedoratricks rpmfusion -i).\n" >&2
+        exit 1
+    fi
+
+    if [[ $# -eq 0 ]]; then
+        rpmfusionHelp
+        exit 1
+    fi
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h | --help)
+                rpmfusionHelp
+                exit 0
+                ;;
+            -i | --install)
+                if [[ -n ${action} && ${action} != "install" ]]; then
+                    printf "Error: Conflicting actions specified ('%s' and 'install').\n" "${action}" >&2
+                    exit 1
+                fi
+                action="install"
+                shift
+                ;;
+            -r | --remove)
+                if [[ -n ${action} && ${action} != "remove" ]]; then
+                    printf "Error: Conflicting actions specified ('%s' and 'remove').\n" "${action}" >&2
+                    exit 1
+                fi
+                action="remove"
+                shift
+                ;;
+            -e | --enable)
+                if [[ -n ${action} && ${action} != "enable" ]]; then
+                    printf "Error: Conflicting actions specified ('%s' and 'enable').\n" "${action}" >&2
+                    exit 1
+                fi
+                action="enable"
+                shift
+                ;;
+            -d | --disable)
+                if [[ -n ${action} && ${action} != "disable" ]]; then
+                    printf "Error: Conflicting actions specified ('%s' and 'disable').\n" "${action}" >&2
+                    exit 1
+                fi
+                action="disable"
+                shift
+                ;;
+            *)
+                printf "\nError: Unrecognized option or typo '%s'\n" "$1" >&2
+
+                # Common beginner mistake catching
+                if [[ $1 =~ ^-?install$ ]]; then
+                    printf "--> Did you mean: -i or --install ?\n" >&2
+                elif [[ $1 =~ ^-?remove$ ]]; then
+                    printf "--> Did you mean: -r or --remove ?\n" >&2
+                elif [[ $1 =~ ^-?enable$ ]]; then
+                    printf "--> Did you mean: -e or --enable ?\n" >&2
+                elif [[ $1 =~ ^-?disable$ ]]; then
+                    printf "--> Did you mean: -d or --disable ?\n" >&2
+                fi
+
+                printf "\nHere are some valid examples:\n" >&2
+                rpmfusionHelp | grep -A 10 "Examples:" >&2
+                printf "\n" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    if [[ -z ${action} ]]; then
+        printf "Error: No action specified. Use -i, -r, -e, or -d.\n" >&2
+        exit 1
+    fi
+
+    # Fetch current Fedora release version dynamically
+    local fedora_ver
+    if ! fedora_ver=$(rpm -E %fedora); then
+        printf "Error: Could not determine Fedora version.\n" >&2
+        exit 1
+    fi
+
+    local free_url="https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${fedora_ver}.noarch.rpm"
+    local nonfree_url="https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${fedora_ver}.noarch.rpm"
+    local target_repos=("rpmfusion-free" "rpmfusion-free-updates" "rpmfusion-nonfree" "rpmfusion-nonfree-updates")
+
+    # DO STUFF
+    if [[ ${action} == "remove" ]]; then
+        printf "\nReverting RPM Fusion configurations for Fedora %s:\n" "${fedora_ver}"
+
+        if [[ ${is_ostree} == true ]]; then
+            printf "Detected OSTree system (Silverblue/Kinoite).\n"
+            rpm-ostree uninstall rpmfusion-free-release rpmfusion-nonfree-release || true
+            printf "\nRPM Fusion uninstalled. Please REBOOT to apply the new ostree deployment.\n"
+        else
+            printf "Detected standard DNF system.\n"
+            dnf remove -y rpmfusion-free-release rpmfusion-nonfree-release || true
+            printf "\nRPM Fusion uninstallation complete.\n"
+        fi
+
+    elif [[ ${action} == "install" ]]; then
+        printf "\nApplying RPM Fusion configurations for Fedora %s:\n" "${fedora_ver}"
+
+        if [[ ${is_ostree} == true ]]; then
+            printf "Detected OSTree system (Silverblue/Kinoite).\n"
+            rpm-ostree install "${free_url}" "${nonfree_url}"
+            printf "\nRPM Fusion installed. Please REBOOT to apply the new ostree deployment.\n"
+        else
+            printf "Detected standard DNF system.\n"
+            dnf install -y "${free_url}" "${nonfree_url}"
+            # RPM Fusion officially recommends updating AppStream metadata after install
+            dnf install -y @core || true
+            printf "\nRPM Fusion installation complete.\n"
+        fi
+
+    elif [[ ${action} == "enable" ]]; then
+        printf "\nEnabling RPM Fusion repositories:\n"
+        local repo
+        for repo in "${target_repos[@]}"; do
+            if [[ -f "/etc/yum.repos.d/${repo}.repo" ]]; then
+                # Safely target only the specific repo block, leaving debuginfo/source alone
+                sed -i -e "/^\[${repo}\]/,/^\[/ s/enabled=0/enabled=1/" "/etc/yum.repos.d/${repo}.repo"
+                printf "  Enabled: %s\n" "${repo}"
+            else
+                printf "  Warning: %s.repo not found. Is RPM Fusion installed?\n" "${repo}" >&2
+            fi
+        done
+        printf "\nRPM Fusion repositories enabled.\n"
+
+    elif [[ ${action} == "disable" ]]; then
+        printf "\nDisabling RPM Fusion repositories:\n"
+        local repo
+        for repo in "${target_repos[@]}"; do
+            if [[ -f "/etc/yum.repos.d/${repo}.repo" ]]; then
+                sed -i -e "/^\[${repo}\]/,/^\[/ s/enabled=1/enabled=0/" "/etc/yum.repos.d/${repo}.repo"
+                printf "  Disabled: %s\n" "${repo}"
+            else
+                printf "  Warning: %s.repo not found.\n" "${repo}" >&2
+            fi
+        done
+        printf "\nRPM Fusion repositories disabled.\n"
+    fi
 }
-
-enable_install() {
-	cat <<EOF
-$ sudo dnf install \ 
-	https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \ 
-	https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm \ 
-	&& \ 
-	sudo dnf config-manager setopt fedora-cisco-openh264.enabled=1 && \ 
-	sudo dnf update @core && \ 
-	sudo dnf install rpmfusion-\*-appstream-data
-EOF
-	pkexec dnf install \
-	https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
-	https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
-	pkexec dnf config-manager setopt fedora-cisco-openh264.enabled=1
-	pkexec dnf update @core
-	pkexec dnf install rpmfusion-\*-appstream-data
-}
-
-enable_soft() {
-	cat <<EOF
-$ sudo dnf config-manager enable \ 
-	rpmfusion-free \ 
-	rpmfusion-free-updates \ 
-	rpmfusion-nonfree \ 
-	rpmfusion-nonfree-updates && \ 
-	sudo dnf config-manager unsetopt \ 
-	fedora-cisco-openh264.enabled
-EOF
-	pkexec dnf config-manager setopt fedora-cisco-openh264.enabled=1
-	pkexec dnf config-manager enable rpmfusion-{free,nonfree} rpmfusion-{free,nonfree}-updates
-}
-
-disable() {
-  cat <<EOF
-$ sudo dnf config-manager disable \ 
-	rpmfusion-free \ 
-	rpmfusion-free-updates \ 
-	rpmfusion-nonfree \ 
-	rpmfusion-nonfree-updates && \ 
-	sudo dnf config-manager unsetopt \ 
-	fedora-cisco-openh264.enabled
-EOF
-	pkexec dnf config-manager unsetopt fedora-cisco-openh264.enabled
-	pkexec dnf config-manager disable rpmfusion-{free,nonfree} rpmfusion-{free,nonfree}-updates
-}
-
 
 rpmfusionCleanup() {
-	# Triggered automatically in case of an unexpected error.
-	echo "Cleaned up after RPMFusion"
-	echo "Tried to do $executeValue and failed."
-	exit 2
+    printf "Cleaned up after <rpmfusion>\n"
+    exit 2
 }
