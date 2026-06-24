@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 trap cleanup SIGINT SIGTERM ERR
 
-COMMANDS=("template" "logs")
+COMMANDS=("template" "logs" "rpmfusion")
 
 COMMAND_DIR="$(rpm -E %{_datarootdir})/fedoratricks"
 if [[ $(readlink -f -- "$0") == *"${HOME}"* ]]; then
