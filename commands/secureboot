@@ -2,144 +2,160 @@
 
 set -Eeuo pipefail
 
-cleanup() {
-    securebootCleanup
-}
+# shellcheck source=/dev/null
+source "${COMMAND_DIR}/utils_core"
+
+cert_path="/etc/pki/akmods/certs/public_key.der"
 
 securebootHelp() {
-    cat << EOF
-Command Usage: fedoratricks secureboot [options]
+    cat <<EOF
+Command Usage: fedoratricks secureboot [action]
 
 Note: This command configures Machine Owner Keys (MOK) for Secure Boot.
 It requires root privileges. OSTree-based systems are currently not supported.
 
+Actions:
+  enable         Generate and import a custom MOK for third-party drivers.
+  disable        Revoke the custom MOK from the system.
+
 Options:
   -h|--help      Print the help text and exit.
-  -e|--enable    Generate and import a custom MOK for third-party drivers.
-  -d|--disable   Revoke the custom MOK from the system.
 
 Examples:
-  fedoratricks secureboot -e
-  fedoratricks secureboot -d
+  fedoratricks secureboot enable
+  fedoratricks secureboot disable
 EOF
 }
 
 # Always define option defaults:
 action=""
 
-securebootExecute() {
-    printf "Executing <secureboot>\n"
-
-    if [[ ! -f "/etc/fedora-release" ]]; then
-        printf "Error: This command is intended for Fedora Linux only.\n" >&2
-        exit 1
-    fi
-
-    if [[ -d "/run/ostree-booted" ]]; then
-        printf "Error: OSTree-based systems are not currently supported for this command.\n" >&2
-        exit 1
-    fi
-
-    if ! command -v dnf > /dev/null 2>&1; then
-        printf "Error: 'dnf' package manager not found.\n" >&2
-        exit 1
-    fi
-
-    if [[ ${EUID} -ne 0 ]]; then
-        printf "Error: Please run this command as root (e.g., sudo fedoratricks secureboot -e).\n" >&2
-        exit 1
-    fi
-
+securebootParseArgs() {
     if [[ $# -eq 0 ]]; then
         securebootHelp
         exit 1
     fi
 
+    # The first argument must be the action: enable or disable
+    case "$1" in
+    enable | disable)
+        action="$1"
+        shift
+        ;;
+    -h | --help)
+        securebootHelp
+        exit 0
+        ;;
+    *)
+        printf "Error: First argument must be an action (enable or disable). Got '%s'.\n" "$1" >&2
+        exit 1
+        ;;
+    esac
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -h | --help)
-                securebootHelp
-                exit 0
-                ;;
-            -e | --enable)
-                if [[ -n ${action} && ${action} != "enable" ]]; then
-                    printf "Error: Conflicting actions specified ('%s' and 'enable').\n" "${action}" >&2
-                    exit 1
-                fi
-                action="enable"
-                shift
-                ;;
-            -d | --disable)
-                if [[ -n ${action} && ${action} != "disable" ]]; then
-                    printf "Error: Conflicting actions specified ('%s' and 'disable').\n" "${action}" >&2
-                    exit 1
-                fi
-                action="disable"
-                shift
-                ;;
-            *)
-                if [[ $1 == -* ]]; then
-                    printf "Unknown option: %s\n" "$1" >&2
-                    exit 1
-                else
-                    printf "Unknown argument: '%s'. Use -e to enable or -d to disable.\n" "$1" >&2
-                    exit 1
-                fi
-                ;;
+        -h | --help)
+            securebootHelp
+            exit 0
+            ;;
+        *)
+            printf "Unknown argument: '%s'. See --help for options.\n" "$1" >&2
+            exit 1
+            ;;
         esac
     done
+}
 
-    if [[ -z ${action} ]]; then
-        printf "Error: No action specified. Use -e|--enable or -d|--disable.\n" >&2
+securebootEnable() {
+    printf "\n\e[1;34mEnabling Secure Boot custom key enrollment:\e[0m\n"
+
+    printf "Installing required packages...\n"
+    run_cmd dnf install -y kmodtool akmods mokutil openssl
+
+    # Skip enrollment completely if the key is already enrolled in the UEFI MOK database
+    if [[ -f ${cert_path} ]] && sudo mokutil --test-key "${cert_path}" 2>&1 | grep -q "is already enrolled"; then
+        printf "Secure Boot custom key is already enrolled in UEFI MOK database. Skipping enrollment.\n"
+        return 0
+    fi
+
+    # Skip enrollment if a key is already staged for import on next reboot
+    if [[ -n "$(sudo mokutil --list-new 2>/dev/null)" ]]; then
+        printf "Secure Boot custom key is already staged for enrollment on next reboot. Skipping staging.\n"
+        return 0
+    fi
+
+    # Skip kmodgenca generation if the key certificate already exists to avoid --force errors
+    if [[ -f ${cert_path} ]]; then
+        printf "AKMODs Machine Owner Key already generated. Skipping generation.\n"
+    else
+        printf "Generating AKMODs Machine Owner Key (MOK)...\n"
+        run_cmd kmodgenca -a || true
+    fi
+
+    if [[ ! -f ${cert_path} ]]; then
+        printf "Error: Certificate generation failed. Not found at %s\n" "${cert_path}" >&2
         exit 1
     fi
 
-    local cert_path="/etc/pki/akmods/certs/public_key.der"
-
-    # DO STUFF
-    if [[ ${action} == "enable" ]]; then
-        printf "\nEnabling Secure Boot custom key enrollment:\n"
-
-        printf "Installing required packages...\n"
-        dnf install -y kmodtool akmods mokutil openssl
-
-        printf "Generating AKMODs Machine Owner Key (MOK)...\n"
-        kmodgenca -a || true # We allow this to pass if the key already exists
-
-        if [[ ! -f ${cert_path} ]]; then
-            printf "Error: Certificate generation failed. Not found at %s\n" "${cert_path}" >&2
-            exit 1
-        fi
-
-        printf "\n============================================================\n"
-        printf " ATTENTION: You will now be prompted to create a password.\n"
-        printf " Remember this password! You will need to enter it on the\n"
-        printf " blue MOK management screen when you reboot your computer.\n"
-        printf "============================================================\n"
-
-        mokutil --import "${cert_path}"
-
-        printf "\nSecure Boot key staged successfully.\n"
-        printf "PLEASE REBOOT YOUR SYSTEM to complete the enrollment process.\n"
-
-    elif [[ ${action} == "disable" ]]; then
-        printf "\nDisabling (Revoking) Secure Boot custom key:\n"
-
-        if [[ -f ${cert_path} ]]; then
-            printf "\n============================================================\n"
-            printf " ATTENTION: You will now be prompted to enter a password.\n"
-            printf " Remember this password! You will need it to confirm the\n"
-            printf " revocation on the blue MOK screen when you reboot.\n"
-            printf "============================================================\n"
-
-            mokutil --revoke "${cert_path}" || printf "Warning: MOK revoke failed or was cancelled.\n" >&2
-
-            printf "\nSecure Boot key revocation staged.\n"
-            printf "PLEASE REBOOT YOUR SYSTEM to complete the process.\n"
-        else
-            printf "No custom key found at %s. Nothing to revoke.\n" "${cert_path}"
-        fi
+    # Double check if enrolled before prompting for import password
+    if sudo mokutil --test-key "${cert_path}" 2>&1 | grep -q "is already enrolled"; then
+        printf "Secure Boot custom key is already enrolled in UEFI MOK database.\n"
+        return 0
     fi
+
+    printf "\n\e[1;31mATTENTION: Create a password now. You must enter this on the blue UEFI MOK screen upon reboot.\e[0m\n"
+
+    local exit_code=0
+    run_cmd mokutil --import "${cert_path}" || exit_code=$?
+
+    if [[ ${exit_code} -eq 0 ]]; then
+        printf "\nSecure Boot key staged successfully. Please reboot your system to enroll it.\n"
+    else
+        printf "\nError: Secure Boot key enrollment failed.\n" >&2
+    fi
+    return ${exit_code}
+}
+
+securebootDisable() {
+    printf "\nDisabling (Revoking) Secure Boot custom key:\n"
+
+    local exit_code=0
+    # Revoke any pending import request (non-interactive)
+    run_cmd mokutil --revoke-import &>/dev/null || true
+
+    if [[ -f ${cert_path} ]]; then
+        printf "\n\e[1;31mATTENTION: Enter a password now. You must enter this on the blue UEFI MOK screen upon reboot to delete the key.\e[0m\n"
+
+        run_cmd mokutil --delete "${cert_path}" || exit_code=$?
+
+        if [[ ${exit_code} -eq 0 ]]; then
+            printf "\nSecure Boot key deletion staged. Please reboot your system to complete the process.\n"
+        else
+            printf "\nError: Staging Secure Boot key deletion failed.\n" >&2
+        fi
+    else
+        printf "No custom key found at %s. Nothing to revoke.\n" "${cert_path}"
+    fi
+    return ${exit_code}
+}
+
+# Main Command Execution
+securebootExecute() {
+    printf "\e[1;34mConfiguring Secure Boot Machine Owner Key (MOK)...\e[0m\n"
+
+    validate_environment "secureboot" "secureboot enable"
+
+    securebootParseArgs "$@"
+
+    init_tasks 1
+
+    if [[ ${action} == "enable" ]]; then
+        execute_task "Enabling Secure Boot custom key" "fedoratricks secureboot enable" "allow" securebootEnable
+    elif [[ ${action} == "disable" ]]; then
+        execute_task "Disabling Secure Boot custom key" "fedoratricks secureboot disable" "allow" securebootDisable
+    fi
+
+    print_task_summary
 }
 
 securebootCleanup() {
