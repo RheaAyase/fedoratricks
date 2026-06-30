@@ -1,5 +1,6 @@
 #!/bin/bash
 
+# shellcheck disable=SC2034
 set -Eeuo pipefail
 
 # shellcheck source=/dev/null
@@ -187,12 +188,12 @@ multimediaSetupIntelConfig() {
 
         printf "        Configuring Intel hardware acceleration modules:\n"
         run_cmd_eval "printf 'options i915 enable_guc=%s\noptions i915 enable_fbc=1\n' '${guc_ver}' > '${conf_file}'"
-        regenerate_initramfs
+        NEEDS_INITRAMFS=true
     else
         if [[ -f ${conf_file} ]]; then
             printf "        Reverting Intel modprobe configurations:\n"
             run_cmd rm -f "${conf_file}"
-            regenerate_initramfs
+            NEEDS_INITRAMFS=true
         else
             track_noop "Remove Intel hardware acceleration modprobe config: ${conf_file}" "SUCCESS (Already removed)"
         fi
@@ -360,6 +361,14 @@ multimediaExecute() {
                     "skip"
             fi
         done
+    fi
+
+    # 5. Register Initramfs Rebuild Task if config was enabled
+    if [[ ${config_enabled} == true ]]; then
+        register_task "Rebuilding initramfs image" \
+            "run_initramfs_rebuild install" \
+            "run_initramfs_rebuild remove" \
+            "skip"
     fi
 
     # 4. Run the transaction!

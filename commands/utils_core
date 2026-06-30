@@ -12,6 +12,7 @@ TASK_FAILED=0
 TASK_SKIPPED=0
 declare -a TASK_RESULTS=()
 declare -a TRANSACTION_ROLLBACK_STACK=()
+NEEDS_INITRAMFS=false
 
 # Global logging variables
 CURRENT_LOG_MODE="USER"
@@ -236,6 +237,15 @@ regenerate_initramfs() {
         run_cmd /usr/sbin/dracut --force || true
     else
         printf "\n        \e[1;31mError: 'dracut' command not found. Initramfs not updated.\e[0m\n" >&2
+    fi
+}
+
+run_initramfs_rebuild() {
+    local action="$1"
+    if [[ ${NEEDS_INITRAMFS:-false} == true ]]; then
+        regenerate_initramfs
+    else
+        track_noop "Rebuild initramfs" "SUCCESS (No changes requiring initramfs rebuild)"
     fi
 }
 

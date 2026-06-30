@@ -1,5 +1,6 @@
 #!/bin/bash
 
+# shellcheck disable=SC2034
 set -Eeuo pipefail
 
 # shellcheck source=/dev/null
@@ -93,7 +94,7 @@ nvidiaSetupSleepConfig() {
             run_cmd sed -i '/NVreg_EnableS0ixPowerManagement/d' "${conf_file}"
             run_cmd sed -i '/NVreg_PreserveVideoMemoryAllocations/d' "${conf_file}"
             run_cmd_eval "printf 'options nvidia NVreg_EnableS0ixPowerManagement=1\noptions nvidia NVreg_PreserveVideoMemoryAllocations=1\n' >> '${conf_file}'"
-            needs_initramfs=true
+            NEEDS_INITRAMFS=true
         fi
         run_cmd systemctl enable nvidia-suspend.service nvidia-hibernate.service nvidia-resume.service
     else
@@ -126,7 +127,7 @@ nvidiaSetupRebarConfig() {
             run_cmd touch "${conf_file}"
             run_cmd sed -i '/NVreg_EnableResizableBar/d' "${conf_file}"
             run_cmd_eval "printf 'options nvidia NVreg_EnableResizableBar=1\n' >> '${conf_file}'"
-            needs_initramfs=true
+            NEEDS_INITRAMFS=true
         fi
     fi
 }
@@ -143,12 +144,12 @@ nvidiaSetupEarlyKmsConfig() {
             printf "        Enabling NVIDIA Early KMS...\n"
             run_cmd mkdir -p /etc/dracut.conf.d
             run_cmd_eval "printf 'force_drivers+=\" nvidia nvidia_modeset nvidia_uvm nvidia_drm \"\n' > '${dracut_conf_file}'"
-            needs_initramfs=true
+            NEEDS_INITRAMFS=true
         fi
     else
         if [[ -f ${dracut_conf_file} ]]; then
             run_cmd rm -f "${dracut_conf_file}"
-            needs_initramfs=true
+            NEEDS_INITRAMFS=true
         else
             track_noop "Remove NVIDIA Early KMS dracut config: ${dracut_conf_file}" "SUCCESS (Already removed)"
         fi
@@ -157,7 +158,6 @@ nvidiaSetupEarlyKmsConfig() {
 
 nvidiaSetupConfig() {
     local action="$1"
-    local needs_initramfs=false
 
     if [[ ${action} == "disable" || ${action} == "remove" ]]; then
         printf "        Reverting NVIDIA custom configurations...\n"
@@ -171,14 +171,10 @@ nvidiaSetupConfig() {
     if [[ ${action} == "disable" || ${action} == "remove" ]]; then
         if [[ -f ${conf_file} ]]; then
             run_cmd rm -f "${conf_file}"
-            needs_initramfs=true
+            NEEDS_INITRAMFS=true
         else
             track_noop "Remove NVIDIA sleep config file: ${conf_file}" "SUCCESS (Already removed)"
         fi
-    fi
-
-    if [[ ${needs_initramfs} == true ]]; then
-        regenerate_initramfs
     fi
 }
 
@@ -268,7 +264,15 @@ nvidiaExecute() {
             "allow"
     fi
 
-    # 3. Run the transaction!
+    # 3. Register Initramfs Rebuild Task if config was enabled
+    if [[ ${config_enabled} == true ]]; then
+        register_task "Rebuilding initramfs image" \
+            "run_initramfs_rebuild install" \
+            "run_initramfs_rebuild remove" \
+            "skip"
+    fi
+
+    # 4. Run the transaction!
     run_transaction "${action}"
 }
 
