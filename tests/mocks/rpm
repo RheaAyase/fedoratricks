@@ -1,0 +1,6 @@
+#!/bin/bash
+if [[ "$*" == *"_datarootdir"* ]]; then
+  printf '/usr/share\n'
+else
+  printf '40\n'
+fi

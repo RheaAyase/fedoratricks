@@ -17,11 +17,15 @@ Provides:   fedoratricks
 Requires:   bash
 Requires:   curl
 
+BuildRequires: shellcheck
+BuildRequires: bats
+
 %description
 A is a collection of scripts to make the life of a beginner Fedora Linux user a little bit easier. We aspire to not spoon-feed the solution, but to also teach what these tools do for you.
 
 %prep
 %setup -C
+shellcheck %{name}.sh commands/*
 
 %install
 install -D -m 0644 commands/* -t "%{buildroot}%{_datarootdir}/%{name}/"

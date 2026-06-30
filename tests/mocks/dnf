@@ -1,0 +1,2 @@
+#!/bin/bash
+printf 'mock dnf %s\n' "$*"

@@ -1,11 +1,12 @@
 #!/bin/bash
 
+set -x
 set -Eeuo pipefail
 trap cleanup SIGINT SIGTERM ERR
 
 COMMANDS=("template" "logs" "rpmfusion")
 
-COMMAND_DIR="$(rpm -E %{_datarootdir})/fedoratricks"
+COMMAND_DIR="$(rpm -E '%{_datarootdir}')/fedoratricks"
 if [[ $(readlink -f -- "$0") == *"${HOME}"* ]]; then
   COMMAND_DIR="$(dirname -- "$(readlink -f -- "$0")")/commands"
   echo "Using user directory, this is for development purposes only:"
@@ -18,6 +19,7 @@ fi
 args=()
 
 for cmd in "${COMMANDS[@]}" ; do
+  # shellcheck disable=SC1090
   source "${COMMAND_DIR}/${cmd}"
 done
 
@@ -44,7 +46,7 @@ EOF
       exit 1
     fi
 
-    ${args[0]}Help
+    "${args[0]}Help"
   fi
 }
 
@@ -56,10 +58,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     -v|--value)
       exampleValue="$2"
+      printf 'value: %s\n' "${exampleValue}"
       shift 2
       ;;
     -b|--boolean)
       exampleBool=true
+      printf 'boolean: %s\n' "${exampleBool}"
       shift
       ;;
     *)
@@ -79,15 +83,16 @@ if [[ ! ${COMMANDS[*]} =~ ${args[0]} ]]; then
   exit 1
 fi
 
-${args[0]}Execute "${args[@]:1}"
+"${args[0]}Execute" "${args[@]:1}"
 
+# shellcheck disable=SC2329
 cleanup() {
   trap - SIGINT SIGTERM ERR EXIT
   if [[ ${#args[@]} != 0 ]]; then
     echo ""
 
     if [[ ! ${COMMANDS[*]} =~ ${args[0]} ]]; then
-      ${args[0]}Cleanup
+      "${args[0]}Cleanup"
     fi
   fi
 
