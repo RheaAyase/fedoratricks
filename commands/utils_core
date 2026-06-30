@@ -245,6 +245,7 @@ run_initramfs_rebuild() {
     if [[ ${NEEDS_INITRAMFS:-false} == true ]]; then
         regenerate_initramfs
     else
+        printf "        No changes require rebuilding initramfs image.\n"
         track_noop "Rebuild initramfs" "SUCCESS (No changes requiring initramfs rebuild)"
     fi
 }
@@ -449,43 +450,57 @@ print_task_summary() {
     fi
     printf "\n  \e[1;34mExecution Summary:\e[0m\n"
 
-    # Count only active (PASSED/FAILED) commands
-    local active_count=0
-    local i
-    for ((i = 0; i < ${#CMD_TRACK_CMD[@]}; i++)); do
-        local status="${CMD_TRACK_STATUS[i]}"
-        if [[ "${status}" == "SUCCESS" || "${status}" =~ "Exit Code" ]]; then
-            active_count=$((active_count + 1))
+    # Display status of every internally run command
+    local total=${#CMD_TRACK_CMD[@]}
+    local result
+    local high_skipped_count=0
+    for result in "${TASK_RESULTS[@]}"; do
+        local status=$(echo "${result}" | cut -d'|' -f1)
+        if [[ "${status}" == "SKIPPED" ]]; then
+            high_skipped_count=$((high_skipped_count + 1))
         fi
     done
+    local grand_total=$((total + high_skipped_count))
 
-    if [[ ${active_count} -eq 0 ]]; then
+    if [[ ${grand_total} -eq 0 ]]; then
         printf "    \e[1;32mNo changes were required (system is already configured).\e[0m\n"
     else
-        local idx=1
-        for ((i = 0; i < ${#CMD_TRACK_CMD[@]}; i++)); do
+        local i
+        for ((i = 0; i < total; i++)); do
             local cmd="${CMD_TRACK_CMD[i]}"
             local status="${CMD_TRACK_STATUS[i]}"
             local type="${CMD_TRACK_TYPE[i]}"
             local rb="${CMD_TRACK_ROLLBACK[i]}"
             local task_name="${CMD_TRACK_TASK_NAME[i]:-}"
 
-            if [[ "${status}" == "SUCCESS" || "${status}" =~ "Exit Code" ]]; then
-                local prefix=""
-                if [[ "${type}" == "FEDORATRICKS" ]]; then
-                    prefix="[Rollback] "
-                fi
+            local prefix=""
+            if [[ "${type}" == "FEDORATRICKS" ]]; then
+                prefix="[Rollback] "
+            fi
 
-                local display_name="${task_name:-${cmd}}"
-                if [[ -n "${task_name}" && -n "${cmd}" && "${cmd}" != "${task_name}" ]]; then
-                    display_name="${task_name} (${cmd})"
-                fi
+            local idx=$((i + 1))
+            local display_name="${task_name:-${cmd}}"
+            if [[ -n "${task_name}" && -n "${cmd}" && "${cmd}" != "${task_name}" ]]; then
+                display_name="${task_name} (${cmd})"
+            fi
 
-                if [[ "${status}" == "SUCCESS" ]]; then
-                    printf "    \e[1;32m[%d/%d] PASSED:\e[0m %s%s\n" "${idx}" "${active_count}" "${prefix}" "${display_name}"
-                else
-                    printf "    \e[1;32m[%d/%d]\e[0m \e[1;31mFAILED:\e[0m %s%s (%s)\n" "${idx}" "${active_count}" "${prefix}" "${display_name}" "${status}"
-                fi
+            if [[ "${status}" == "SUCCESS" ]]; then
+                printf "    \e[1;32m[%d/%d] PASSED:\e[0m %s%s\n" "${idx}" "${grand_total}" "${prefix}" "${display_name}"
+            elif [[ "${status}" =~ "Exit Code" ]]; then
+                printf "    \e[1;32m[%d/%d]\e[0m \e[1;31mFAILED:\e[0m %s%s (%s)\n" "${idx}" "${grand_total}" "${prefix}" "${display_name}" "${status}"
+            else
+                printf "    \e[1;32m[%d/%d]\e[0m \e[1;33mSKIPPED:\e[0m %s%s\n" "${idx}" "${grand_total}" "${prefix}" "${display_name}"
+            fi
+        done
+
+        # Display high-level skipped tasks (since they didn't run any internal command)
+        local idx=$((total + 1))
+        for result in "${TASK_RESULTS[@]}"; do
+            local status name act cmd
+            status=$(echo "${result}" | cut -d'|' -f1)
+            name=$(echo "${result}" | cut -d'|' -f2)
+            if [[ "${status}" == "SKIPPED" ]]; then
+                printf "    \e[1;32m[%d/%d]\e[0m \e[1;33mSKIPPED:\e[0m %s\n" "${idx}" "${grand_total}" "${name}"
                 idx=$((idx + 1))
             fi
         done
