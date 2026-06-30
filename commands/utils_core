@@ -228,15 +228,14 @@ validate_environment() {
 
 # 6. Rebuild initramfs using dracut
 regenerate_initramfs() {
-    printf "        Rebuilding initramfs image...\n"
     if command -v dracut >/dev/null 2>&1; then
-        run_cmd dracut --force || printf "        Warning: dracut encountered an error.\n" >&2
+        run_cmd dracut --force || true
     elif [[ -x "/usr/bin/dracut" ]]; then
-        run_cmd /usr/bin/dracut --force || printf "        Warning: dracut encountered an error.\n" >&2
+        run_cmd /usr/bin/dracut --force || true
     elif [[ -x "/usr/sbin/dracut" ]]; then
-        run_cmd /usr/sbin/dracut --force || printf "        Warning: dracut encountered an error.\n" >&2
+        run_cmd /usr/sbin/dracut --force || true
     else
-        printf "        Warning: 'dracut' command not found. Initramfs not updated.\n" >&2
+        printf "\n        \e[1;31mError: 'dracut' command not found. Initramfs not updated.\e[0m\n" >&2
     fi
 }
 
