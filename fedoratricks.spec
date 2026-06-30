@@ -12,6 +12,7 @@ URL:        https://github.com/RheaAyase/fedoratricks
 Source:     https://github.com/RheaAyase/fedoratricks/releases/latest/download/fedoratricks-%{version}.tar.gz
 
 BuildArch:  noarch
+BuildRequires: shellcheck
 Provides:   fedoratricks
 
 Requires:   bash
@@ -22,6 +23,7 @@ A is a collection of scripts to make the life of a beginner Fedora Linux user a 
 
 %prep
 %setup -C
+shellcheck %{name}.sh commands/*
 
 %install
 install -D -m 0644 commands/* -t "%{buildroot}%{_datarootdir}/%{name}/"
