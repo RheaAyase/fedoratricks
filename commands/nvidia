@@ -160,6 +160,24 @@ nvidiaSetupConfig() {
     local action="$1"
 
     if [[ ${action} == "disable" || ${action} == "remove" ]]; then
+        local needs_revert=false
+        if [[ -f ${conf_file} || -f ${dracut_conf_file} ]]; then
+            needs_revert=true
+        fi
+        local svc
+        for svc in nvidia-suspend.service nvidia-hibernate.service nvidia-resume.service; do
+            if systemctl list-unit-files | grep -q "^${svc}" &>/dev/null; then
+                needs_revert=true
+                break
+            fi
+        done
+
+        if [[ ${needs_revert} == false ]]; then
+            printf "        NVIDIA configurations are already reverted.\n"
+            track_noop "Revert NVIDIA configurations" "SUCCESS (Already reverted)"
+            return 0
+        fi
+
         printf "        Reverting NVIDIA custom configurations...\n"
     fi
 
@@ -214,9 +232,22 @@ nvidiaSetupDriver() {
 
         printf "        \e[1;31mATTENTION: Please wait 5-10 minutes before rebooting to allow AKMOD to compile the driver.\e[0m\n"
     else
+        local needs_remove=false
+        if [[ -n "$(rpm -qa "akmod-nvidia*" "xorg-x11-drv-nvidia*")" ]]; then
+            needs_remove=true
+        fi
+        if systemctl list-unit-files | grep -q "^nvidia-persistenced.service" &>/dev/null; then
+            needs_remove=true
+        fi
+
+        if [[ ${needs_remove} == false ]]; then
+            printf "        NVIDIA drivers and utilities are already removed.\n"
+            track_noop "Remove NVIDIA drivers" "SUCCESS (Already removed)"
+            return 0
+        fi
+
         printf "        Removing proprietary NVIDIA drivers and utilities...\n"
 
-        # Pre-check if packages are installed before running remove
         if [[ -n "$(rpm -qa "akmod-nvidia*" "xorg-x11-drv-nvidia*")" ]]; then
             run_cmd dnf remove -y "akmod-nvidia*" "xorg-x11-drv-nvidia*" || return $?
         else

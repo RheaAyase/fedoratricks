@@ -195,6 +195,7 @@ multimediaSetupIntelConfig() {
             run_cmd rm -f "${conf_file}"
             NEEDS_INITRAMFS=true
         else
+            printf "        Intel hardware acceleration is already reverted.\n"
             track_noop "Remove Intel hardware acceleration modprobe config: ${conf_file}" "SUCCESS (Already removed)"
         fi
     fi
@@ -219,6 +220,7 @@ multimediaSetupAmdDriver() {
             printf "        Reverting mesa drivers:\n"
             run_cmd dnf install -y mesa-va-drivers mesa-vdpau-drivers --allowerasing --skip-unavailable || exit_code=$?
         else
+            printf "        AMD mesa freeworld drivers are already reverted.\n"
             track_noop "Revert AMD mesa freeworld drivers" "SUCCESS (Already reverted)"
         fi
     fi
@@ -249,6 +251,7 @@ multimediaSetupNvidiaDriver() {
         if [[ ${installed} == true ]]; then
             run_cmd dnf remove -y "${MULTIMEDIA_NVIDIA_EXTRAS[@]}" || true
         else
+            printf "        NVIDIA multimedia extras packages are already removed.\n"
             track_noop "Remove NVIDIA multimedia extras packages" "SUCCESS (Already removed)"
         fi
     fi
@@ -266,9 +269,27 @@ multimediaSetupBase() {
 multimediaSetupOptional() {
     local action="$1"
     if [[ ${action} == "enable" || ${action} == "install" ]]; then
-        run_cmd dnf install -y "${MULTIMEDIA_BASE_CODECS[@]}" --skip-unavailable || return $?
+        if ! rpm -q "${MULTIMEDIA_BASE_CODECS[@]}" &>/dev/null; then
+            run_cmd dnf install -y "${MULTIMEDIA_BASE_CODECS[@]}" --skip-unavailable || return $?
+        else
+            printf "        Optional system codecs are already installed.\n"
+            track_noop "Install optional system codecs" "SUCCESS (Already installed)"
+        fi
     else
-        run_cmd dnf remove -y "${MULTIMEDIA_BASE_CODECS[@]}" || return $?
+        local pkg installed=false
+        for pkg in "${MULTIMEDIA_BASE_CODECS[@]}"; do
+            if rpm -q "${pkg}" &>/dev/null; then
+                installed=true
+                break
+            fi
+        done
+
+        if [[ ${installed} == true ]]; then
+            run_cmd dnf remove -y "${MULTIMEDIA_BASE_CODECS[@]}" || return $?
+        else
+            printf "        Optional system codecs are already removed.\n"
+            track_noop "Remove optional system codecs" "SUCCESS (Already removed)"
+        fi
     fi
 }
 
