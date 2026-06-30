@@ -147,6 +147,9 @@ setupRpmfusionConfig() {
                 printf "          Enabled: %s\n" "${repo}"
             done
             printf "        RPM Fusion repositories enabled.\n"
+        else
+            printf "        RPM Fusion repositories are already enabled.\n"
+            track_noop "Enable RPM Fusion repositories" "SUCCESS (Already enabled)"
         fi
     else
         local repos_to_disable=()
@@ -163,6 +166,9 @@ setupRpmfusionConfig() {
                 printf "          Disabled: %s\n" "${repo}"
             done
             printf "        RPM Fusion repositories disabled.\n"
+        else
+            printf "        RPM Fusion repositories are already disabled.\n"
+            track_noop "Disable RPM Fusion repositories" "SUCCESS (Already disabled)"
         fi
     fi
 }

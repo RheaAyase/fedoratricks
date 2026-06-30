@@ -353,18 +353,7 @@ multimediaExecute() {
         "skip"
 
     # 2. Register optional system codecs task
-    local has_optional_installed=false
-    if [[ ${action} == "remove" ]]; then
-        local pkg
-        for pkg in "${MULTIMEDIA_BASE_CODECS[@]}"; do
-            if rpm -q "${pkg}" &>/dev/null; then
-                has_optional_installed=true
-                break
-            fi
-        done
-    fi
-
-    if [[ ${with_optional} == true || ${has_optional_installed} == true ]]; then
+    if [[ ${with_optional} == true ]]; then
         register_task "Optional system codecs (${MULTIMEDIA_BASE_CODECS[*]})" \
             "multimediaSetupOptional install" \
             "multimediaSetupOptional remove" \
@@ -372,18 +361,7 @@ multimediaExecute() {
     fi
 
     # 3. Register optional hardware-specific driver package task
-    local has_vendor_drivers_installed=false
-    if [[ ${action} == "remove" ]]; then
-        local pkg
-        for pkg in intel-media-driver intel-vpl-gpu-rt libva-intel-driver mesa-va-drivers-freeworld mesa-vdpau-drivers-freeworld "${MULTIMEDIA_NVIDIA_EXTRAS[@]}"; do
-            if rpm -q "${pkg}" &>/dev/null; then
-                has_vendor_drivers_installed=true
-                break
-            fi
-        done
-    fi
-
-    if [[ ${with_optional} == true || ${has_vendor_drivers_installed} == true ]]; then
+    if [[ ${with_optional} == true ]]; then
         local vendor
         for vendor in "${vendors[@]}"; do
             register_task "Optional hardware driver for ${vendor}" \
@@ -394,12 +372,7 @@ multimediaExecute() {
     fi
 
     # 4. Register hardware acceleration configuration task
-    local has_config_installed=false
-    if [[ -f "/etc/modprobe.d/intel-fedoratricks.conf" ]]; then
-        has_config_installed=true
-    fi
-
-    if [[ ${config_enabled} == true || (${action} == "remove" && ${has_config_installed} == true) ]]; then
+    if [[ ${config_enabled} == true ]]; then
         local vendor
         for vendor in "${vendors[@]}"; do
             if [[ ${vendor} == "intel" ]]; then
@@ -411,8 +384,8 @@ multimediaExecute() {
         done
     fi
 
-    # 5. Register Initramfs Rebuild Task if config was enabled or present
-    if [[ ${config_enabled} == true || (${action} == "remove" && ${has_config_installed} == true) ]]; then
+    # 5. Register Initramfs Rebuild Task if config was enabled
+    if [[ ${config_enabled} == true ]]; then
         register_task "Rebuilding initramfs image" \
             "run_initramfs_rebuild install" \
             "run_initramfs_rebuild remove" \
