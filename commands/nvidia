@@ -247,6 +247,10 @@ nvidiaExecute() {
     nvidiaParseArgs "$@"
 
     if [[ ${action} == "install" ]]; then
+        if ! lspci | grep -i 'vga\|3d' | grep -i nvidia &>/dev/null; then
+            printf "  Error: No NVIDIA GPU detected on this system. Cannot install NVIDIA drivers.\n" >&2
+            exit 1
+        fi
         check_and_install_rpmfusion
     fi
 

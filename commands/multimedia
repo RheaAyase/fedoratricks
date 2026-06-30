@@ -117,7 +117,7 @@ multimediaParseArgs() {
 multimediaSetupIntelDriver() {
     local action="$1"
     if [[ ${intel_gen} == "pre-skylake" ]]; then
-        if [[ ${action} == "enable" ]]; then
+        if [[ ${action} == "enable" || ${action} == "install" ]]; then
             if ! rpm -q libva-intel-driver &>/dev/null; then
                 run_cmd dnf install -y libva-intel-driver --skip-unavailable || return $?
             else
@@ -138,7 +138,7 @@ multimediaSetupIntelDriver() {
         intel_pkgs+=(intel-vpl-gpu-rt)
     fi
 
-    if [[ ${action} == "enable" ]]; then
+    if [[ ${action} == "enable" || ${action} == "install" ]]; then
         if ! rpm -q "${intel_pkgs[@]}" &>/dev/null; then
             run_cmd dnf install -y "${intel_pkgs[@]}" --skip-unavailable || return $?
         else
@@ -163,7 +163,7 @@ multimediaSetupIntelDriver() {
 multimediaSetupIntelConfig() {
     local action="$1"
     if [[ ! ${intel_gen} =~ ^(skylake|tigerlake)$ ]]; then
-        if [[ ${action} == "enable" ]]; then
+        if [[ ${action} == "enable" || ${action} == "install" ]]; then
             printf "GuC/HuC configuration is not supported or required for pre-skylake Intel CPUs.\n"
         fi
         return 0
@@ -171,7 +171,7 @@ multimediaSetupIntelConfig() {
 
     local conf_file="/etc/modprobe.d/intel-fedoratricks.conf"
 
-    if [[ ${action} == "enable" ]]; then
+    if [[ ${action} == "enable" || ${action} == "install" ]]; then
         local guc_ver="2"
         if [[ ${intel_gen} == "tigerlake" ]]; then
             guc_ver="3"
@@ -203,7 +203,7 @@ multimediaSetupAmdDriver() {
     fi
 
     local exit_code=0
-    if [[ ${action} == "enable" ]]; then
+    if [[ ${action} == "enable" || ${action} == "install" ]]; then
         if ! rpm -q mesa-va-drivers-freeworld mesa-vdpau-drivers-freeworld &>/dev/null; then
             run_cmd dnf install -y mesa-va-drivers-freeworld mesa-vdpau-drivers-freeworld --allowerasing --skip-unavailable || exit_code=$?
         else
@@ -226,7 +226,7 @@ multimediaSetupNvidiaDriver() {
         return 0
     fi
 
-    if [[ ${action} == "enable" ]]; then
+    if [[ ${action} == "enable" || ${action} == "install" ]]; then
         if ! rpm -q "${MULTIMEDIA_NVIDIA_EXTRAS[@]}" &>/dev/null; then
             run_cmd dnf install -y "${MULTIMEDIA_NVIDIA_EXTRAS[@]}" --skip-unavailable || return $?
         else

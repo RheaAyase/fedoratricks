@@ -71,12 +71,26 @@ rpmfusionParseArgs() {
 setupRpmfusionPackages() {
     local action="$1"
     if [[ ${action} == "enable" || ${action} == "install" ]]; then
-        # Check if already installed to avoid redundant slow DNF runs
-        if rpm -q rpmfusion-free-release rpmfusion-nonfree-release &>/dev/null; then
+        # Check if already installed and repo files exist to avoid redundant slow DNF runs
+        local repo_files_exist=true
+        if [[ ! -f /etc/yum.repos.d/rpmfusion-free.repo || ! -f /etc/yum.repos.d/rpmfusion-nonfree.repo ]]; then
+            repo_files_exist=false
+        fi
+
+        if rpm -q rpmfusion-free-release rpmfusion-nonfree-release &>/dev/null && [[ ${repo_files_exist} == true ]]; then
             track_noop "Install RPM Fusion packages" "SUCCESS (Already installed)"
             return 0
         fi
+
         printf "        Applying RPM Fusion configurations for Fedora %s:\n" "${fedora_ver}"
+        if rpm -q rpmfusion-free-release rpmfusion-nonfree-release &>/dev/null; then
+            # Silently remove packages first if registered as installed but files are missing
+            if [[ ${EUID} -eq 0 ]]; then
+                dnf remove -y rpmfusion-free-release rpmfusion-nonfree-release &>/dev/null || true
+            else
+                sudo dnf remove -y rpmfusion-free-release rpmfusion-nonfree-release &>/dev/null || true
+            fi
+        fi
         run_cmd dnf install -y "${free_url}" "${nonfree_url}" || return $?
         # RPM Fusion officially recommends updating AppStream metadata after install
         run_cmd dnf install -y @core || true
@@ -97,52 +111,59 @@ setupRpmfusionConfig() {
     local action="$1"
     local repo
 
-    # Check if RPM Fusion repositories are installed
+    # Check if RPM Fusion repositories are installed and repo files exist
+    local repos_installed=true
     if ! rpm -q rpmfusion-free-release rpmfusion-nonfree-release &>/dev/null; then
+        repos_installed=false
+    fi
+    if [[ ! -f /etc/yum.repos.d/rpmfusion-free.repo || ! -f /etc/yum.repos.d/rpmfusion-nonfree.repo ]]; then
+        repos_installed=false
+    fi
+
+    if [[ ${repos_installed} == false ]]; then
         if [[ ${action} == "enable" || ${action} == "install" ]]; then
-            printf "\e[1;34mRPM Fusion repositories are not installed.\e[0m\n" >&2
-            printf "\e[1;34mWould you like to install them now?\e[0m\n" >&2
-            local response
-            if read -r -p "Is this ok [y/N]: " response; then
-                if [[ ${response} =~ ^([yY][eE][sS]|[yY])$ ]]; then
-                    # Install packages first
-                    setupRpmfusionPackages enable || return $?
-                else
-                    printf "Error: RPM Fusion repositories must be installed to configure them.\n" >&2
-                    return 1
-                fi
-            else
-                printf "\nError: RPM Fusion repositories must be installed to configure them.\n" >&2
-                return 1
-            fi
+            printf "        RPM Fusion repositories are not installed or configuration files are missing.\n" >&2
+            printf "        Installing them now...\n" >&2
+            # Install packages first
+            setupRpmfusionPackages enable || return $?
         else
-            printf "Error: RPM Fusion repositories are not installed on this system. Cannot disable/remove.\n" >&2
+            printf "        Error: RPM Fusion repositories are not installed on this system. Cannot disable/remove.\n" >&2
             return 1
         fi
     fi
 
     if [[ ${action} == "enable" || ${action} == "install" ]]; then
-        printf "        Enabling RPM Fusion repositories:\n"
+        local repos_to_enable=()
         for repo in "${target_repos[@]}"; do
-            if dnf repolist --enabled 2>/dev/null | grep -q "^${repo}[[:space:]]"; then
-                track_noop "Enable RPM Fusion repository: ${repo}" "SUCCESS (Already enabled)"
-            else
+            if ! dnf repolist --enabled 2>/dev/null | grep -q "^${repo}[[:space:]]"; then
+                repos_to_enable+=("${repo}")
+            fi
+        done
+
+        if [[ ${#repos_to_enable[@]} -gt 0 ]]; then
+            printf "        Enabling RPM Fusion repositories:\n"
+            for repo in "${repos_to_enable[@]}"; do
                 run_cmd dnf config-manager setopt "${repo}.enabled=1"
                 printf "          Enabled: %s\n" "${repo}"
-            fi
-        done
-        printf "        RPM Fusion repositories enabled.\n"
+            done
+            printf "        RPM Fusion repositories enabled.\n"
+        fi
     else
-        printf "        Disabling RPM Fusion repositories:\n"
+        local repos_to_disable=()
         for repo in "${target_repos[@]}"; do
             if dnf repolist --enabled 2>/dev/null | grep -q "^${repo}[[:space:]]"; then
-                run_cmd dnf config-manager setopt "${repo}.enabled=0"
-                printf "          Disabled: %s\n" "${repo}"
-            else
-                track_noop "Disable RPM Fusion repository: ${repo}" "SUCCESS (Already disabled)"
+                repos_to_disable+=("${repo}")
             fi
         done
-        printf "        RPM Fusion repositories disabled.\n"
+
+        if [[ ${#repos_to_disable[@]} -gt 0 ]]; then
+            printf "        Disabling RPM Fusion repositories:\n"
+            for repo in "${repos_to_disable[@]}"; do
+                run_cmd dnf config-manager setopt "${repo}.enabled=0"
+                printf "          Disabled: %s\n" "${repo}"
+            done
+            printf "        RPM Fusion repositories disabled.\n"
+        fi
     fi
 }
 
