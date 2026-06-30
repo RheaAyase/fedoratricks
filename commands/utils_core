@@ -856,7 +856,21 @@ run_transaction_enable() {
 run_transaction_disable() {
     local total="$1"
     local i
+    local defer_rebuild_idx=""
+
+    # Find the rebuild initramfs task to defer
     for ((i = total - 1; i >= 0; i--)); do
+        if [[ "${TASK_NAMES[i]}" == "Rebuilding initramfs image" ]]; then
+            defer_rebuild_idx="${i}"
+            break
+        fi
+    done
+
+    # Execute all other tasks in reverse order
+    for ((i = total - 1; i >= 0; i--)); do
+        if [[ -n "${defer_rebuild_idx}" && ${i} -eq ${defer_rebuild_idx} ]]; then
+            continue
+        fi
         local exit_code=0
         execute_transaction_task "${i}" "disable" || exit_code=$?
         if [[ ${exit_code} -ne 0 ]]; then
@@ -864,6 +878,16 @@ run_transaction_disable() {
             exit ${exit_code}
         fi
     done
+
+    # Finally, execute the deferred rebuild task at the very end
+    if [[ -n "${defer_rebuild_idx}" ]]; then
+        local exit_code=0
+        execute_transaction_task "${defer_rebuild_idx}" "disable" || exit_code=$?
+        if [[ ${exit_code} -ne 0 ]]; then
+            print_task_summary
+            exit ${exit_code}
+        fi
+    fi
 }
 
 run_transaction() {

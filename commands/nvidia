@@ -257,15 +257,20 @@ nvidiaExecute() {
         "allow"
 
     # 2. Register NVIDIA Config Task
-    if [[ ${config_enabled} == true ]]; then
+    local has_config_installed=false
+    if [[ -f "/etc/modprobe.d/nvidia-fedoratricks.conf" || -f "/etc/dracut.conf.d/99-nvidia-fedoratricks.conf" ]]; then
+        has_config_installed=true
+    fi
+
+    if [[ ${config_enabled} == true || (${action} == "remove" && ${has_config_installed} == true) ]]; then
         register_task "NVIDIA driver configurations" \
             "nvidiaSetupConfig install" \
             "nvidiaSetupConfig remove" \
             "allow"
     fi
 
-    # 3. Register Initramfs Rebuild Task if config was enabled
-    if [[ ${config_enabled} == true ]]; then
+    # 3. Register Initramfs Rebuild Task if config was enabled or present
+    if [[ ${config_enabled} == true || (${action} == "remove" && ${has_config_installed} == true) ]]; then
         register_task "Rebuilding initramfs image" \
             "run_initramfs_rebuild install" \
             "run_initramfs_rebuild remove" \
