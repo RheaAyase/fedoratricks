@@ -1,123 +1,197 @@
 #!/bin/bash
 
 set -Eeuo pipefail
-cleanup() {
-	rpmfusionCleanup
-}
 
+# shellcheck source=/dev/null
+source "${COMMAND_DIR}/utils_core"
+
+fedora_ver=$(rpm -E %fedora 2>/dev/null || echo "40")
+free_url="https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${fedora_ver}.noarch.rpm"
+nonfree_url="https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${fedora_ver}.noarch.rpm"
+target_repos=("rpmfusion-free" "rpmfusion-free-updates" "rpmfusion-nonfree" "rpmfusion-nonfree-updates")
 
 rpmfusionHelp() {
-	cat <<EOF
-Command Usage: fedoratricks rpmfusion [options]
+    cat <<EOF
+Command Usage: fedoratricks rpmfusion [action]
+
+Note: This command requires root privileges.
+
+Actions:
+  install        Install RPM Fusion repositories.
+  remove         Remove RPM Fusion repositories.
 
 Options:
--h|--help    Print the help text and exit.
-enable       Enable the RPMFusion repository.
-disable      Disable the RPMFusion repository.
-status       View the installation status of the RPMFusion repository.
+  -h|--help      Print the help text and exit.
+
+Examples:
+  fedoratricks rpmfusion install
+  fedoratricks rpmfusion remove
 EOF
 }
 
 # Always define option defaults:
-executeValue="status"
+action=""
 
+rpmfusionParseArgs() {
+    if [[ $# -eq 0 ]]; then
+        rpmfusionHelp
+        exit 1
+    fi
+
+    # The first argument must be the action: install or remove
+    case "$1" in
+    install | remove)
+        action="$1"
+        shift
+        ;;
+    -h | --help)
+        rpmfusionHelp
+        exit 0
+        ;;
+    *)
+        printf "Error: First argument must be an action (install or remove). Got '%s'.\n" "$1" >&2
+        exit 1
+        ;;
+    esac
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        -h | --help)
+            rpmfusionHelp
+            exit 0
+            ;;
+        *)
+            printf "Unknown argument: '%s'. See --help for options.\n" "$1" >&2
+            exit 1
+            ;;
+        esac
+    done
+}
+
+setupRpmfusionPackages() {
+    local action="$1"
+    if [[ ${action} == "enable" || ${action} == "install" ]]; then
+        # Check if already installed and repo files exist to avoid redundant slow DNF runs
+        local repo_files_exist=true
+        if [[ ! -f /etc/yum.repos.d/rpmfusion-free.repo || ! -f /etc/yum.repos.d/rpmfusion-nonfree.repo ]]; then
+            repo_files_exist=false
+        fi
+
+        if rpm -q rpmfusion-free-release rpmfusion-nonfree-release &>/dev/null && [[ ${repo_files_exist} == true ]]; then
+            track_noop "Install RPM Fusion packages" "SUCCESS (Already installed)"
+            return 0
+        fi
+
+        printf "        Applying RPM Fusion configurations for Fedora %s:\n" "${fedora_ver}"
+        if rpm -q rpmfusion-free-release rpmfusion-nonfree-release &>/dev/null; then
+            # Silently remove packages first if registered as installed but files are missing
+            if [[ ${EUID} -eq 0 ]]; then
+                dnf remove -y rpmfusion-free-release rpmfusion-nonfree-release &>/dev/null || true
+            else
+                sudo dnf remove -y rpmfusion-free-release rpmfusion-nonfree-release &>/dev/null || true
+            fi
+        fi
+        run_cmd dnf install -y "${free_url}" "${nonfree_url}" || return $?
+        # RPM Fusion officially recommends updating AppStream metadata after install
+        run_cmd dnf install -y @core || true
+        printf "        RPM Fusion installation complete.\n"
+    else
+        # Check if already uninstalled to avoid redundant slow DNF runs
+        if ! rpm -q rpmfusion-free-release rpmfusion-nonfree-release &>/dev/null; then
+            track_noop "Uninstall RPM Fusion packages" "SUCCESS (Already removed)"
+            return 0
+        fi
+        printf "        Reverting RPM Fusion configurations for Fedora %s:\n" "${fedora_ver}"
+        run_cmd dnf remove -y rpmfusion-free-release rpmfusion-nonfree-release || return $?
+        printf "        RPM Fusion uninstallation complete.\n"
+    fi
+}
+
+setupRpmfusionConfig() {
+    local action="$1"
+    local repo
+
+    # Check if RPM Fusion repositories are installed and repo files exist
+    local repos_installed=true
+    if ! rpm -q rpmfusion-free-release rpmfusion-nonfree-release &>/dev/null; then
+        repos_installed=false
+    fi
+    if [[ ! -f /etc/yum.repos.d/rpmfusion-free.repo || ! -f /etc/yum.repos.d/rpmfusion-nonfree.repo ]]; then
+        repos_installed=false
+    fi
+
+    if [[ ${repos_installed} == false ]]; then
+        if [[ ${action} == "enable" || ${action} == "install" ]]; then
+            printf "        RPM Fusion repositories are not installed or configuration files are missing.\n" >&2
+            printf "        Installing them now...\n" >&2
+            # Install packages first
+            setupRpmfusionPackages enable || return $?
+        else
+            printf "        Error: RPM Fusion repositories are not installed on this system. Cannot disable/remove.\n" >&2
+            return 1
+        fi
+    fi
+
+    if [[ ${action} == "enable" || ${action} == "install" ]]; then
+        local repos_to_enable=()
+        for repo in "${target_repos[@]}"; do
+            if ! dnf repolist --enabled 2>/dev/null | grep -q "^${repo}[[:space:]]"; then
+                repos_to_enable+=("${repo}")
+            fi
+        done
+
+        if [[ ${#repos_to_enable[@]} -gt 0 ]]; then
+            printf "        Enabling RPM Fusion repositories:\n"
+            for repo in "${repos_to_enable[@]}"; do
+                run_cmd dnf config-manager setopt "${repo}.enabled=1"
+                printf "          Enabled: %s\n" "${repo}"
+            done
+            printf "        RPM Fusion repositories enabled.\n"
+        else
+            printf "        RPM Fusion repositories are already enabled.\n"
+            track_noop "Enable RPM Fusion repositories" "SUCCESS (Already enabled)"
+        fi
+    else
+        local repos_to_disable=()
+        for repo in "${target_repos[@]}"; do
+            if dnf repolist --enabled 2>/dev/null | grep -q "^${repo}[[:space:]]"; then
+                repos_to_disable+=("${repo}")
+            fi
+        done
+
+        if [[ ${#repos_to_disable[@]} -gt 0 ]]; then
+            printf "        Disabling RPM Fusion repositories:\n"
+            for repo in "${repos_to_disable[@]}"; do
+                run_cmd dnf config-manager setopt "${repo}.enabled=0"
+                printf "          Disabled: %s\n" "${repo}"
+            done
+            printf "        RPM Fusion repositories disabled.\n"
+        else
+            printf "        RPM Fusion repositories are already disabled.\n"
+            track_noop "Disable RPM Fusion repositories" "SUCCESS (Already disabled)"
+        fi
+    fi
+}
+
+# Main Command Execution
 rpmfusionExecute() {
-	echo "Executing RPMFusion"
+    log_print "  \e[1;34mConfiguring RPM Fusion repositories...\e[0m\n"
 
-	while [[ $# -gt 0 ]]; do
-		case $1 in
-			enable)
-				executeValue="enable"
-				shift
-				;;
-			disable)
-				executeValue="disable"
-				shift
-				;;
-			status)
-				executeValue="status"
-				shift
-				;;
-			*)
-				echo "Unknown option $1"
-				exit 1
-				;;
-		esac
-	done
+    validate_environment "rpmfusion" "rpmfusion install"
 
-  # DO STUFF
-	if [[ $executeValue = "enable" ]]; then
-		if [[ $(grep rpmfusion-free /etc/dnf/repos.override.d/99-config_manager.repo -c) -gt 0 ]] then
-			enable_soft
-		else
-			enable_install
-		fi
-	fi
-	if [[ $executeValue = "disable" ]]; then
-		disable
-	fi
-	if [[ $executeValue = "status" ]]; then
-		echo "Listing installed RPMFusion repositories:"
-		echo "$ sudo dnf repo list | grep rpmfusion"
-		if repo_list="$(pkexec dnf repo list | grep rpmfusion)"; then
-			echo "$repo_list"
-		else
-			echo "No matches found."
-		fi
-	fi
+    rpmfusionParseArgs "$@"
 
+    if [[ ${action} == "install" || ${action} == "remove" ]]; then
+        register_task "RPM Fusion repository configuration" \
+            "setupRpmfusionConfig install" \
+            "setupRpmfusionConfig remove" \
+            "allow"
+
+        run_transaction "${action}"
+    fi
 }
-
-enable_install() {
-	cat <<EOF
-$ sudo dnf install \ 
-	https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \ 
-	https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm \ 
-	&& \ 
-	sudo dnf config-manager setopt fedora-cisco-openh264.enabled=1 && \ 
-	sudo dnf update @core && \ 
-	sudo dnf install rpmfusion-\*-appstream-data
-EOF
-	pkexec dnf install \
-	https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
-	https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
-	pkexec dnf config-manager setopt fedora-cisco-openh264.enabled=1
-	pkexec dnf update @core
-	pkexec dnf install rpmfusion-\*-appstream-data
-}
-
-enable_soft() {
-	cat <<EOF
-$ sudo dnf config-manager enable \ 
-	rpmfusion-free \ 
-	rpmfusion-free-updates \ 
-	rpmfusion-nonfree \ 
-	rpmfusion-nonfree-updates && \ 
-	sudo dnf config-manager unsetopt \ 
-	fedora-cisco-openh264.enabled
-EOF
-	pkexec dnf config-manager setopt fedora-cisco-openh264.enabled=1
-	pkexec dnf config-manager enable rpmfusion-{free,nonfree} rpmfusion-{free,nonfree}-updates
-}
-
-disable() {
-  cat <<EOF
-$ sudo dnf config-manager disable \ 
-	rpmfusion-free \ 
-	rpmfusion-free-updates \ 
-	rpmfusion-nonfree \ 
-	rpmfusion-nonfree-updates && \ 
-	sudo dnf config-manager unsetopt \ 
-	fedora-cisco-openh264.enabled
-EOF
-	pkexec dnf config-manager unsetopt fedora-cisco-openh264.enabled
-	pkexec dnf config-manager disable rpmfusion-{free,nonfree} rpmfusion-{free,nonfree}-updates
-}
-
 
 rpmfusionCleanup() {
-	# Triggered automatically in case of an unexpected error.
-	echo "Cleaned up after RPMFusion"
-	echo "Tried to do $executeValue and failed."
-	exit 2
+    printf "Cleaned up after <rpmfusion>\n"
+    exit 2
 }

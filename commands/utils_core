@@ -1,0 +1,937 @@
+#!/bin/bash
+
+# shellcheck disable=SC2155,SC2034,SC2154,SC2059,SC2001,SC2086,SC2024,SC1091
+
+# Shared utility functions for fedoratricks
+
+# Global task tracking variables
+TASK_TOTAL=1
+TASK_CURRENT=1
+TASK_PASSED=0
+TASK_FAILED=0
+TASK_SKIPPED=0
+declare -a TASK_RESULTS=()
+declare -a TRANSACTION_ROLLBACK_STACK=()
+NEEDS_INITRAMFS=false
+
+# Global logging variables
+CURRENT_LOG_MODE="USER"
+LOG_FILE="/var/log/fedoratricks"
+FALLBACK_LOG_DIR="${HOME}/.local/share/fedoratricks"
+FALLBACK_LOG_FILE="${FALLBACK_LOG_DIR}/fedoratricks.log"
+export FEDORATRICKS_REDIRECT_OUTPUT="true"
+
+ensure_log_file_setup() {
+    local log_file="/var/log/fedoratricks"
+
+    # If it is a directory from a previous run, remove it
+    if [[ -d "${log_file}" ]]; then
+        if [[ ${EUID} -eq 0 ]]; then
+            rm -rf "${log_file}" &>/dev/null || true
+        else
+            sudo rm -rf "${log_file}" &>/dev/null || true
+        fi
+    fi
+
+    if [[ ! -f "${log_file}" || ! -w "${log_file}" ]]; then
+        # Try to initialize it with root privileges via sudo/EUID check
+        if [[ ${EUID} -eq 0 ]]; then
+            touch "${log_file}" &>/dev/null || true
+            chmod 666 "${log_file}" &>/dev/null || true
+        else
+            # Only request sudo if we actually need to create or chmod it
+            sudo touch "${log_file}" &>/dev/null || true
+            sudo chmod 666 "${log_file}" &>/dev/null || true
+        fi
+    fi
+}
+
+get_active_log_file() {
+    local log_file="/var/log/fedoratricks"
+    if [[ -f "${log_file}" && -w "${log_file}" ]]; then
+        echo "${log_file}"
+    else
+        mkdir -p "${FALLBACK_LOG_DIR}" 2>/dev/null || true
+        # Clean up fallback ownership if it was changed to root in a previous run
+        if [[ -f "${FALLBACK_LOG_FILE}" && ! -w "${FALLBACK_LOG_FILE}" ]]; then
+            if [[ ${EUID} -eq 0 ]]; then
+                # If running as root, we can just chown directly
+                chown "$(logname 2>/dev/null || echo "${SUDO_USER:-$(whoami)}")" "${FALLBACK_LOG_FILE}" &>/dev/null || true
+                chmod 664 "${FALLBACK_LOG_FILE}" &>/dev/null || true
+            else
+                sudo chown "$(id -u):$(id -g)" "${FALLBACK_LOG_FILE}" &>/dev/null || true
+                sudo chmod 664 "${FALLBACK_LOG_FILE}" &>/dev/null || true
+            fi
+        fi
+        echo "${FALLBACK_LOG_FILE}"
+    fi
+}
+
+log_transaction_event() {
+    local status="$1" # "RUNNING", "COMPLETED", "TASK_START", etc.
+    local detail="$2"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+    ensure_log_file_setup
+
+    local log_file
+    log_file=$(get_active_log_file)
+
+    printf "[%s] [%s] [%s] %s\n" "${timestamp}" "${CURRENT_LOG_MODE}" "${status}" "${detail}" >>"${log_file}" 2>/dev/null || true
+}
+
+log_print() {
+    if [[ "${FEDORATRICKS_REDIRECT_OUTPUT:-}" == "true" ]]; then
+        local log_file
+        log_file=$(get_active_log_file)
+        printf "$@" >>"${log_file}" 2>/dev/null || true
+    else
+        printf "$@" >&2
+    fi
+}
+
+# Command tracking variables
+declare -a CMD_TRACK_TIME=()
+declare -a CMD_TRACK_TYPE=()
+declare -a CMD_TRACK_CMD=()
+declare -a CMD_TRACK_STATUS=()
+declare -a CMD_TRACK_ROLLBACK=()
+declare -a CMD_TRACK_DNF_ID=()
+declare -a CMD_TRACK_TASK_NAME=()
+declare -a DNF_TRANSACTION_STACK=()
+
+track_command_execution() {
+    local cmd="$1"
+    local exit_code="$2"
+    local pre_dnf_id="${3:-}"
+    local status="SUCCESS"
+    if [[ ${exit_code} -ne 0 ]]; then
+        status="Exit Code: ${exit_code}"
+    fi
+
+    local idx=${#CMD_TRACK_CMD[@]}
+    CMD_TRACK_TIME[idx]=$(date '+%Y-%m-%d %H:%M:%S')
+    CMD_TRACK_TYPE[idx]="${CURRENT_LOG_MODE}"
+    CMD_TRACK_CMD[idx]="${cmd}"
+    CMD_TRACK_STATUS[idx]="${status}"
+    CMD_TRACK_ROLLBACK[idx]=""
+    CMD_TRACK_DNF_ID[idx]=""
+    CMD_TRACK_TASK_NAME[idx]="${CURRENT_TASK_NAME:-}"
+
+    # If this was a DNF command and not in auto-rollback, compare pre-command DNF ID with post-command DNF ID
+    if [[ "${CURRENT_LOG_MODE}" != "FEDORATRICKS" ]]; then
+        if [[ ${cmd} =~ ^(sudo[[:space:]]+)?dnf([[:space:]]|$) ]]; then
+            local post_dnf_id
+            post_dnf_id=$(dnf history list 2>/dev/null | awk 'NR==2 {print $1}' 2>/dev/null || true)
+
+            # If a new transaction ID was created (even on failure), track and push it!
+            if [[ -n ${post_dnf_id} && ${post_dnf_id} =~ ^[0-9]+$ && "${post_dnf_id}" != "${pre_dnf_id}" ]]; then
+                CMD_TRACK_DNF_ID[idx]="${post_dnf_id}"
+
+                # Push to DNF_TRANSACTION_STACK
+                local s_idx=${#DNF_TRANSACTION_STACK[@]}
+                DNF_TRANSACTION_STACK[s_idx]="${post_dnf_id}"
+            fi
+        fi
+    fi
+}
+
+track_noop() {
+    local cmd="$1"
+    local status="${2:-SUCCESS (Already configured)}"
+
+    local idx=${#CMD_TRACK_CMD[@]}
+    CMD_TRACK_TIME[idx]=$(date '+%Y-%m-%d %H:%M:%S')
+    CMD_TRACK_TYPE[idx]="${CURRENT_LOG_MODE}"
+    CMD_TRACK_CMD[idx]="${cmd}"
+    CMD_TRACK_STATUS[idx]="${status}"
+    CMD_TRACK_ROLLBACK[idx]=""
+    CMD_TRACK_DNF_ID[idx]=""
+    CMD_TRACK_TASK_NAME[idx]="${CURRENT_TASK_NAME:-}"
+}
+
+print_command_history_summary() {
+    printf "\n\e[1;34mDetailed Command Execution History:\e[0m\n"
+    local i
+    for ((i = 0; i < ${#CMD_TRACK_CMD[@]}; i++)); do
+        local time="${CMD_TRACK_TIME[i]}"
+        local type="${CMD_TRACK_TYPE[i]}"
+        local cmd="${CMD_TRACK_CMD[i]}"
+        local status="${CMD_TRACK_STATUS[i]}"
+        local rb="${CMD_TRACK_ROLLBACK[i]}"
+
+        local color="\e[1;30m" # Gray for success
+        if [[ "${status}" =~ "FAILED" ]]; then
+            color="\e[1;31m" # Red for failure
+        fi
+
+        printf "  [%s] [%s] %b%s: %s\e[0m" "${time}" "${type}" "${color}" "${status}" "${cmd}"
+        if [[ -n "${rb}" ]]; then
+            printf " \e[1;33m[Rollback: %s]\e[0m" "${rb}"
+        fi
+        printf "\n"
+    done
+}
+
+# 1. Check if the system is Fedora
+check_fedora() {
+    if [[ ! -f "/etc/fedora-release" ]]; then
+        printf "Error: This command is intended for Fedora Linux only.\n" >&2
+        exit 1
+    fi
+}
+
+# 2. Check if the package manager (dnf) is available
+check_dnf() {
+    if ! command -v dnf >/dev/null 2>&1; then
+        printf "Error: 'dnf' package manager not found.\n" >&2
+        exit 1
+    fi
+}
+
+# 3. Block running with root privileges on startup
+warn_root_execution() {
+    if [[ ${EUID} -eq 0 ]]; then
+        printf "\e[1;31mError: Running fedoratricks directly as root/sudo is not allowed for security reasons.\e[0m\n" >&2
+        printf "\e[1;31mPlease run the command as a regular user; individual tasks will request sudo privileges as needed.\e[0m\n" >&2
+        exit 1
+    fi
+}
+
+check_root() {
+    warn_root_execution
+}
+
+# 4. Check if the system is OSTree-based
+is_ostree() {
+    [[ -d "/run/ostree-booted" ]]
+}
+
+# 5. Block OSTree-based systems with a custom message
+block_ostree() {
+    local cmd_msg="${1:-this command}"
+    if is_ostree; then
+        printf "Error: OSTree-based systems are not supported for %s.\n" "${cmd_msg}" >&2
+        exit 1
+    fi
+}
+
+# 6. Unified validation function for command environments
+validate_environment() {
+    local cmd_name="$1"
+    local privilege_action="$2"
+    check_fedora
+    block_ostree "${cmd_name}"
+    check_dnf
+    warn_root_execution
+}
+
+# 6. Rebuild initramfs using dracut
+regenerate_initramfs() {
+    if command -v dracut >/dev/null 2>&1; then
+        run_cmd dracut --force || true
+    elif [[ -x "/usr/bin/dracut" ]]; then
+        run_cmd /usr/bin/dracut --force || true
+    elif [[ -x "/usr/sbin/dracut" ]]; then
+        run_cmd /usr/sbin/dracut --force || true
+    else
+        printf "\n        \e[1;31mError: 'dracut' command not found. Initramfs not updated.\e[0m\n" >&2
+    fi
+}
+
+run_initramfs_rebuild() {
+    local action="$1"
+    if [[ ${NEEDS_INITRAMFS:-false} == true ]]; then
+        regenerate_initramfs
+    else
+        printf "        No changes require rebuilding initramfs image.\n"
+        track_noop "Rebuild initramfs" "SUCCESS (No changes requiring initramfs rebuild)"
+    fi
+}
+
+# 7. Check if RPM Fusion repositories are installed and enabled, prompt to install if not
+check_and_install_rpmfusion() {
+    log_print "  Verifying RPM Fusion repositories...\n"
+    local active_repos
+
+    if ! active_repos=$(dnf repolist --enabled 2>/dev/null); then
+        printf "Error: Failed to fetch dnf repolist.\n" >&2
+        exit 1
+    fi
+
+    local missing=false
+    if ! grep -qi "rpmfusion-free" <<<"${active_repos}"; then
+        missing=true
+    fi
+    if ! grep -qi "rpmfusion-nonfree" <<<"${active_repos}"; then
+        missing=true
+    fi
+    if [[ ${missing} == true ]]; then
+        printf "\n\e[1;34mRPM Fusion (Free & Non-Free) repositories are required but not enabled.\e[0m\n" >&2
+        printf "\e[1;34mWould you like to install and enable them now?\e[0m\n" >&2
+        local response
+        if read -r -p "Is this ok [y/N]: " response; then
+            if [[ ${response} =~ ^([yY][eE][sS]|[yY])$ ]]; then
+                # Dynamically append this task to the existing execution sequence
+                if [[ -n ${TASK_TOTAL:-} ]]; then
+                    TASK_TOTAL=$((TASK_TOTAL + 1))
+                else
+                    init_tasks 1
+                fi
+                execute_task "Installing RPM Fusion repositories" "fedoratricks rpmfusion install" "allow" setupRpmfusionConfig install
+            else
+                printf "Error: RPM Fusion repositories are required to proceed.\n" >&2
+                exit 1
+            fi
+        else
+            printf "\nError: RPM Fusion repositories are required to proceed.\n" >&2
+            exit 1
+        fi
+    fi
+}
+
+# 7.5. Check if inxi is installed, prompt to install if not
+install_inxi() {
+    printf "\nInstalling inxi:\n"
+    if [[ ${EUID} -eq 0 ]]; then
+        echo "$ dnf install -y inxi"
+        dnf install -y inxi
+    elif command -v pkexec >/dev/null 2>&1; then
+        echo "$ pkexec dnf install -y inxi"
+        pkexec dnf install -y inxi
+    else
+        echo "$ sudo dnf install -y inxi"
+        sudo dnf install -y inxi
+    fi
+}
+
+check_and_install_inxi() {
+    if ! command -v inxi >/dev/null 2>&1; then
+        printf "\n\e[1;34minxi is required but not installed.\e[0m\n" >&2
+        printf "\e[1;34mWould you like to install it now?\e[0m\n" >&2
+        local response
+        if read -r -p "Is this ok [y/N]: " response; then
+            if [[ ${response} =~ ^([yY][eE][sS]|[yY])$ ]]; then
+                # Dynamically append this task to the existing execution sequence
+                if [[ -n ${TASK_TOTAL:-} ]]; then
+                    TASK_TOTAL=$((TASK_TOTAL + 1))
+                else
+                    init_tasks 1
+                fi
+                execute_task "Installing inxi" "dnf install -y inxi" "allow" install_inxi
+            else
+                printf "Error: inxi is required to proceed.\n" >&2
+                exit 1
+            fi
+        else
+            printf "\nError: inxi is required to proceed.\n" >&2
+            exit 1
+        fi
+    fi
+}
+
+# 8. Task execution tracking
+init_tasks() {
+    TASK_TOTAL="$1"
+    TASK_CURRENT=1
+    TASK_PASSED=0
+    TASK_FAILED=0
+    TASK_SKIPPED=0
+    TASK_RESULTS=()
+}
+
+trigger_transaction_rollback() {
+    local rollback_count=${#TRANSACTION_ROLLBACK_STACK[@]}
+    if [[ ${rollback_count} -gt 0 ]]; then
+        local old_log_mode="${CURRENT_LOG_MODE}"
+        CURRENT_LOG_MODE="FEDORATRICKS"
+
+        log_transaction_event "ROLLBACK_START" "Triggered by task failure"
+
+        printf "\n  \e[1;33mStarting rollback...\e[0m\n" >&2
+
+        # Calculate new TASK_TOTAL
+        TASK_TOTAL=$((TASK_CURRENT + rollback_count))
+
+        # Revert in reverse order
+        for ((i = rollback_count - 1; i >= 0; i--)); do
+            local cmd="${TRANSACTION_ROLLBACK_STACK[i]}"
+            CURRENT_TASK_NAME="[Rollback] ${cmd}"
+            printf "\n  \e[1;31m[%d/%d]\e[0m \e[1;34mUNDO:\e[0m \e[1m%s\e[0m\n" "${TASK_CURRENT}" "${TASK_TOTAL}" "${cmd}" >&2
+            local display_cmd=$(format_cmd_display "${cmd}")
+            printf "        \e[1;30m%s\e[0m\n" "${display_cmd}" >&2
+
+            log_transaction_event "TASK_ROLLBACK_START" "${cmd}"
+            local exit_code=0
+            eval "${cmd}" || exit_code=$?
+            if [[ ${exit_code} -eq 0 ]]; then
+                log_transaction_event "TASK_ROLLBACK_COMPLETED" "${cmd}"
+            else
+                log_transaction_event "TASK_ROLLBACK_FAILED" "${cmd} (Exit Code: ${exit_code})"
+                printf "        \e[1;31mWarning: Rollback command failed: %s\e[0m\n" "${cmd}" >&2
+            fi
+            TASK_CURRENT=$((TASK_CURRENT + 1))
+        done
+        # Reset stack after rollback
+        TRANSACTION_ROLLBACK_STACK=()
+        printf "\n  \e[1;32mRollback completed successfully.\e[0m\n" >&2
+        log_transaction_event "ROLLBACK_END" "Rollback completed"
+
+        CURRENT_LOG_MODE="${old_log_mode}"
+    fi
+}
+
+execute_task() {
+    local task_name="$1"
+    local cmd_str="$2"
+    local ostree_behavior="$3" # 'allow' or 'skip'
+    shift 3
+
+    CURRENT_TASK_NAME="${task_name}"
+
+    # Red ongoing indicator
+    printf "\n  \e[1;31m[%d/%d]\e[0m \e[1;34mRUNNING:\e[0m \e[1m%s\e[0m\n" "${TASK_CURRENT}" "${TASK_TOTAL}" "${task_name}"
+
+    log_transaction_event "TASK_START" "${task_name}"
+
+    # Check for OSTree skip
+    if is_ostree && [[ ${ostree_behavior} == "skip" ]]; then
+        printf "Warning: OSTree system detected. Skipping execution of task: %s\n" "${task_name}" >&2
+        TASK_RESULTS+=("SKIPPED|${task_name}|skip|${cmd_str}")
+        TASK_SKIPPED=$((TASK_SKIPPED + 1))
+        TASK_CURRENT=$((TASK_CURRENT + 1))
+        log_transaction_event "TASK_SKIPPED" "${task_name}"
+        return 0
+    fi
+
+    local exit_code=0
+    # Run the task function directly without redirecting its wrapper stdout/stderr.
+    # Individual commands inside the function (like dnf) are redirected by run_escalated.
+    "$@" || exit_code=$?
+
+    if [[ ${exit_code} -eq 0 ]]; then
+        TASK_RESULTS+=("PASSED|${task_name}|${action:-enable}|${cmd_str}")
+        TASK_PASSED=$((TASK_PASSED + 1))
+        log_transaction_event "TASK_COMPLETED" "${task_name} (PASSED)"
+    else
+        TASK_RESULTS+=("FAILED|${task_name}|${action:-enable}|${cmd_str}")
+        TASK_FAILED=$((TASK_FAILED + 1))
+
+        # Capture error and show relevant message to the user
+        printf "\n  \e[1;31m[!] ERROR: Task '%s' failed with exit code %s. Check /var/log/fedoratricks for details.\e[0m\n" "${task_name}" "${exit_code}" >&2
+        log_transaction_event "TASK_FAILED" "${task_name} (Exit Code: ${exit_code})"
+
+        # Revert successfully executed tasks
+        trigger_transaction_rollback
+
+        # Print summary and exit
+        print_task_summary
+        exit ${exit_code}
+    fi
+
+    TASK_CURRENT=$((TASK_CURRENT + 1))
+    return ${exit_code}
+}
+
+print_task_summary() {
+    if [[ ${FEDORATRICKS_SILENT_SUMMARY:-} == "true" ]]; then
+        return 0
+    fi
+
+    local fedora_ver=$(rpm -E %fedora 2>/dev/null || echo "40")
+    local arch=$(uname -m)
+    if [[ "${FEDORATRICKS_REDIRECT_OUTPUT:-}" == "true" ]]; then
+        local log_file
+        log_file=$(get_active_log_file)
+        printf "\n  Fedora %s - %s\n" "${fedora_ver}" "${arch}" >>"${log_file}" 2>/dev/null || true
+    else
+        printf "\n  Fedora %s - %s\n" "${fedora_ver}" "${arch}"
+    fi
+    printf "\n  \e[1;34mExecution Summary:\e[0m\n"
+
+    # Display status of every internally run command
+    local total=${#CMD_TRACK_CMD[@]}
+    local result
+    local high_skipped_count=0
+    for result in "${TASK_RESULTS[@]}"; do
+        local status=$(echo "${result}" | cut -d'|' -f1)
+        if [[ "${status}" == "SKIPPED" ]]; then
+            high_skipped_count=$((high_skipped_count + 1))
+        fi
+    done
+    local grand_total=$((total + high_skipped_count))
+
+    if [[ ${grand_total} -eq 0 ]]; then
+        printf "    \e[1;32mNo changes were required (system is already configured).\e[0m\n"
+    else
+        local i
+        for ((i = 0; i < total; i++)); do
+            local cmd="${CMD_TRACK_CMD[i]}"
+            local status="${CMD_TRACK_STATUS[i]}"
+            local type="${CMD_TRACK_TYPE[i]}"
+            local rb="${CMD_TRACK_ROLLBACK[i]}"
+            local task_name="${CMD_TRACK_TASK_NAME[i]:-}"
+
+            local prefix=""
+            if [[ "${type}" == "FEDORATRICKS" ]]; then
+                prefix="[Rollback] "
+            fi
+
+            local idx=$((i + 1))
+            local display_name="${task_name:-${cmd}}"
+            if [[ -n "${task_name}" && -n "${cmd}" && "${cmd}" != "${task_name}" ]]; then
+                display_name="${task_name} (${cmd})"
+            fi
+
+            if [[ "${status}" == "SUCCESS" ]]; then
+                printf "    \e[1;32m[%d/%d] PASSED:\e[0m %s%s\n" "${idx}" "${grand_total}" "${prefix}" "${display_name}"
+            elif [[ "${status}" =~ "Exit Code" ]]; then
+                printf "    \e[1;32m[%d/%d]\e[0m \e[1;31mFAILED:\e[0m %s%s (%s)\n" "${idx}" "${grand_total}" "${prefix}" "${display_name}" "${status}"
+            else
+                printf "    \e[1;32m[%d/%d]\e[0m \e[1;33mSKIPPED:\e[0m %s%s\n" "${idx}" "${grand_total}" "${prefix}" "${display_name}"
+            fi
+        done
+
+        # Display high-level skipped tasks (since they didn't run any internal command)
+        local idx=$((total + 1))
+        for result in "${TASK_RESULTS[@]}"; do
+            local status name act cmd
+            status=$(echo "${result}" | cut -d'|' -f1)
+            name=$(echo "${result}" | cut -d'|' -f2)
+            if [[ "${status}" == "SKIPPED" ]]; then
+                printf "    \e[1;32m[%d/%d]\e[0m \e[1;33mSKIPPED:\e[0m %s\n" "${idx}" "${grand_total}" "${name}"
+                idx=$((idx + 1))
+            fi
+        done
+    fi
+
+    if ((TASK_FAILED > 0)); then
+        printf "\n  \e[1;31mTransaction failed!\e[0m\n"
+        exit 1
+    else
+        printf "\n  \e[1;32mComplete!\e[0m\n"
+    fi
+}
+
+# Global cleanup trap override to prevent command function bleeding
+cleanup() {
+    trap - SIGINT SIGTERM ERR EXIT
+
+    # Ensure we print the execution summary on unexpected failure/interrupt
+    if [[ ${#TASK_RESULTS[@]} -gt 0 ]]; then
+        print_task_summary
+    fi
+
+    if [[ ${#args[@]} -gt 0 ]]; then
+        local cmd="${args[0]}"
+        if declare -f "${cmd}Cleanup" >/dev/null 2>&1; then
+            "${cmd}Cleanup"
+        fi
+    fi
+}
+
+format_cmd_display() {
+    local cmd_str="$1"
+    local pkexec_regex='^pkexec[[:space:]]+(.*)'
+    local system_regex='^(dnf|systemctl|sed|touch|rm|mkdir|dracut|kmodgenca|mokutil|journalctl)([[:space:]]+.*|$)'
+    local redirect_regex='^(printf|echo)[[:space:]]+.*[>]+[[:space:]]*['\''"]?/(etc|usr|var|run)/.*'
+
+    # Replace pkexec with sudo
+    if [[ ${cmd_str} =~ ${pkexec_regex} ]]; then
+        cmd_str="sudo ${BASH_REMATCH[1]}"
+    fi
+    # Prepend sudo to system commands
+    if [[ ${cmd_str} =~ ${system_regex} ]]; then
+        cmd_str="sudo ${cmd_str}"
+    # For printf redirecting to system files, wrap in sudo sh -c
+    elif [[ ${cmd_str} =~ ${redirect_regex} ]]; then
+        # Escape internal double quotes if any to prevent syntax breaking
+        local escaped_cmd_str=$(echo "${cmd_str}" | sed 's/"/\\"/g')
+        cmd_str="sudo sh -c \"${escaped_cmd_str}\""
+    fi
+    echo "${cmd_str}"
+}
+
+resolve_rollback_dnf_cmd() {
+    local cmd="$1"
+    local pop_mode="${2:-peek}"
+
+    if [[ "${CURRENT_LOG_MODE}" == "FEDORATRICKS" ]]; then
+        local first_arg=$(echo "${cmd}" | awk '{print $1}')
+        local is_dnf=false
+        if [[ ${first_arg} == "dnf" || (${first_arg} == "sudo" && $(echo "${cmd}" | awk '{print $2}') == "dnf") ]]; then
+            is_dnf=true
+        fi
+
+        if [[ ${is_dnf} == true ]]; then
+            local dnf_id=""
+            local stack_len=${#DNF_TRANSACTION_STACK[@]}
+            if [[ ${stack_len} -gt 0 ]]; then
+                local last_s_idx=$((stack_len - 1))
+                dnf_id="${DNF_TRANSACTION_STACK[last_s_idx]}"
+                if [[ "${pop_mode}" == "pop" ]]; then
+                    unset 'DNF_TRANSACTION_STACK[last_s_idx]'
+                    DNF_TRANSACTION_STACK=("${DNF_TRANSACTION_STACK[@]}")
+                fi
+            fi
+
+            # Secondary Method: Fallback to searching CMD_TRACK_ROLLBACK if stack was empty
+            if [[ -z "${dnf_id}" ]]; then
+                local clean_rb=$(echo "${cmd}" | sed -E 's/^(sudo|pkexec)[[:space:]]+//')
+                local j
+                for ((j = ${#CMD_TRACK_CMD[@]} - 1; j >= 0; j--)); do
+                    local track_rb="${CMD_TRACK_ROLLBACK[j]}"
+                    local clean_track_rb=$(echo "${track_rb}" | sed -E 's/^(sudo|pkexec)[[:space:]]+//')
+
+                    if [[ "${clean_track_rb}" == "${clean_rb}" && -n "${CMD_TRACK_DNF_ID[j]}" ]]; then
+                        dnf_id="${CMD_TRACK_DNF_ID[j]}"
+                        break
+                    fi
+                done
+            fi
+
+            if [[ -n "${dnf_id}" ]]; then
+                echo "dnf history undo -y ${dnf_id}"
+                return 0
+            fi
+        fi
+    fi
+    echo "${cmd}"
+}
+
+# Execute a command string or array with sudo if not already root
+run_escalated() {
+    # If in auto-rollback mode, intercept any DNF operations and replace with history undo
+    if [[ "${CURRENT_LOG_MODE}" == "FEDORATRICKS" ]]; then
+        local rb_cmd=""
+        if [[ $# -eq 1 ]]; then
+            rb_cmd="$1"
+        else
+            rb_cmd="$*"
+        fi
+
+        local resolved_cmd=$(resolve_rollback_dnf_cmd "${rb_cmd}" "pop")
+        if [[ "${resolved_cmd}" != "${rb_cmd}" ]]; then
+            set -- ${resolved_cmd}
+        fi
+    fi
+
+    local cmd_str=""
+    if [[ $# -eq 1 ]]; then
+        cmd_str="$1"
+    else
+        cmd_str="$*"
+    fi
+
+    # Query pre-execution DNF transaction ID if running a DNF command (not in auto-rollback)
+    local pre_dnf_id=""
+    if [[ "${CURRENT_LOG_MODE}" != "FEDORATRICKS" ]]; then
+        if [[ ${cmd_str} =~ ^(sudo[[:space:]]+)?dnf([[:space:]]|$) ]]; then
+            pre_dnf_id=$(dnf history list 2>/dev/null | awk 'NR==2 {print $1}' 2>/dev/null || true)
+        fi
+    fi
+
+    log_transaction_event "RUNNING" "${cmd_str}"
+
+    local exit_code=0
+    local tracked_cmd="${cmd_str}"
+
+    if [[ $# -eq 1 ]]; then
+        local cmd_str_esc="$1"
+        if [[ ${EUID} -ne 0 ]]; then
+            if [[ ! ${cmd_str_esc} =~ ^(sudo|pkexec)[[:space:]] ]]; then
+                local redirect_regex='^(printf|echo)[[:space:]]+.*[>]+[[:space:]]*['\''"]?/(etc|usr|var|run)/.*'
+                if [[ ${cmd_str_esc} =~ ${redirect_regex} ]]; then
+                    local escaped_cmd_str=$(echo "${cmd_str_esc}" | sed 's/"/\\"/g')
+                    cmd_str_esc="sudo sh -c \"${escaped_cmd_str}\""
+                else
+                    cmd_str_esc="sudo ${cmd_str_esc}"
+                fi
+            fi
+        fi
+        tracked_cmd="${cmd_str_esc}"
+
+        if [[ "${FEDORATRICKS_REDIRECT_OUTPUT:-}" == "true" ]]; then
+            local log_file
+            log_file=$(get_active_log_file)
+            printf "[%s] [%s] [START_OUTPUT] ===\n" "$(date '+%Y-%m-%d %H:%M:%S')" "${CURRENT_LOG_MODE}" >>"${log_file}" 2>/dev/null || true
+            eval "${cmd_str_esc}" >>"${log_file}" 2>&1 || exit_code=$?
+            printf "[%s] [%s] [END_OUTPUT] ===\n" "$(date '+%Y-%m-%d %H:%M:%S')" "${CURRENT_LOG_MODE}" >>"${log_file}" 2>/dev/null || true
+        else
+            eval "${cmd_str_esc}" || exit_code=$?
+        fi
+    else
+        if [[ ${EUID} -ne 0 ]]; then
+            local system_commands="^(dnf|systemctl|sed|touch|rm|mkdir|dracut|kmodgenca|mokutil|journalctl)$"
+            if [[ "$1" =~ ${system_commands} ]]; then
+                tracked_cmd="sudo $*"
+                if [[ "${FEDORATRICKS_REDIRECT_OUTPUT:-}" == "true" ]]; then
+                    local log_file
+                    log_file=$(get_active_log_file)
+                    printf "[%s] [%s] [START_OUTPUT] ===\n" "$(date '+%Y-%m-%d %H:%M:%S')" "${CURRENT_LOG_MODE}" >>"${log_file}" 2>/dev/null || true
+                    sudo "$@" >>"${log_file}" 2>&1 || exit_code=$?
+                    printf "[%s] [%s] [END_OUTPUT] ===\n" "$(date '+%Y-%m-%d %H:%M:%S')" "${CURRENT_LOG_MODE}" >>"${log_file}" 2>/dev/null || true
+                else
+                    sudo "$@" || exit_code=$?
+                fi
+                log_transaction_event "COMPLETED" "Exit Code: ${exit_code}"
+                track_command_execution "${tracked_cmd}" "${exit_code}" "${pre_dnf_id}"
+                return ${exit_code}
+            fi
+        fi
+
+        if [[ "${FEDORATRICKS_REDIRECT_OUTPUT:-}" == "true" ]]; then
+            local log_file
+            log_file=$(get_active_log_file)
+            printf "[%s] [%s] [START_OUTPUT] ===\n" "$(date '+%Y-%m-%d %H:%M:%S')" "${CURRENT_LOG_MODE}" >>"${log_file}" 2>/dev/null || true
+            "$@" >>"${log_file}" 2>&1 || exit_code=$?
+            printf "[%s] [%s] [END_OUTPUT] ===\n" "$(date '+%Y-%m-%d %H:%M:%S')" "${CURRENT_LOG_MODE}" >>"${log_file}" 2>/dev/null || true
+        else
+            "$@" || exit_code=$?
+        fi
+    fi
+
+    log_transaction_event "COMPLETED" "Exit Code: ${exit_code}"
+    track_command_execution "${tracked_cmd}" "${exit_code}" "${pre_dnf_id}"
+    return ${exit_code}
+}
+
+# Run a command, printing it in bold dark gray with newlines before and after
+run_cmd() {
+    if [[ $# -eq 3 ]] && [[ "$3" =~ ^(enable|disable|install|remove|config)$ ]]; then
+        local enable_cmd="$1"
+        local disable_cmd="$2"
+        local mode="$3"
+
+        if [[ "${mode}" == "enable" || "${mode}" == "install" || "${mode}" == "config" ]]; then
+            local display_cmd=$(format_cmd_display "${enable_cmd}")
+            printf "        \e[1;30m%s\e[0m\n" "${display_cmd}" >&2
+            run_escalated "${enable_cmd}"
+            local exit_code=$?
+            if [[ ${exit_code} -eq 0 ]]; then
+                # Update rollback command link in tracking array
+                local last_idx=$((${#CMD_TRACK_CMD[@]} - 1))
+                if [[ ${last_idx} -ge 0 ]]; then
+                    CMD_TRACK_ROLLBACK[last_idx]="${disable_cmd}"
+                fi
+                TRANSACTION_ROLLBACK_STACK+=("${disable_cmd}")
+            fi
+            return ${exit_code}
+        elif [[ "${mode}" == "disable" || "${mode}" == "remove" ]]; then
+            local resolved_cmd=$(resolve_rollback_dnf_cmd "${disable_cmd}" "peek")
+            local display_cmd=$(format_cmd_display "${resolved_cmd}")
+            printf "        \e[1;30m%s\e[0m\n" "${display_cmd}" >&2
+            run_escalated "${disable_cmd}"
+            return $?
+        else
+            # Default fallback if mode doesn't match
+            local display_cmd=$(format_cmd_display "${enable_cmd}")
+            printf "        \e[1;30m%s\e[0m\n" "${display_cmd}" >&2
+            run_escalated "${enable_cmd}"
+            return $?
+        fi
+    else
+        local cmd_str="$*"
+        local resolved_cmd=$(resolve_rollback_dnf_cmd "${cmd_str}" "peek")
+        local display_cmd=$(format_cmd_display "${resolved_cmd}")
+        printf "        \e[1;30m%s\e[0m\n" "${display_cmd}" >&2
+        run_escalated "$@"
+    fi
+}
+
+# Global registered tasks tracking arrays
+declare -a TASK_NAMES=()
+declare -a TASK_ENABLE_CMDS=()
+declare -a TASK_DISABLE_CMDS=()
+declare -a TASK_OSTREE_BEHAVIOR=()
+
+register_task() {
+    TASK_NAMES+=("$1")
+    TASK_ENABLE_CMDS+=("$2")
+    TASK_DISABLE_CMDS+=("$3")
+    TASK_OSTREE_BEHAVIOR+=("${4:-allow}")
+}
+
+execute_transaction_task() {
+    local i="$1"
+    local action="$2" # "enable" or "disable"
+    local name="${TASK_NAMES[i]}"
+    local cmd
+    local ostree="${TASK_OSTREE_BEHAVIOR[i]}"
+
+    CURRENT_TASK_NAME="${name}"
+
+    if [[ ${action} == "enable" || ${action} == "install" ]]; then
+        cmd="${TASK_ENABLE_CMDS[i]}"
+        printf "\n  \e[1;31m[%d/%d]\e[0m \e[1;34mRUNNING:\e[0m \e[1m%s\e[0m\n" "${TASK_CURRENT}" "${TASK_TOTAL}" "${name}"
+    else
+        cmd="${TASK_DISABLE_CMDS[i]}"
+        printf "\n  \e[1;31m[%d/%d]\e[0m \e[1;34mRUNNING:\e[0m \e[1mReverting: %s\e[0m\n" "${TASK_CURRENT}" "${TASK_TOTAL}" "${name}"
+    fi
+
+    log_transaction_event "TASK_START" "${name} (${action})"
+
+    if is_ostree && [[ ${ostree} == "skip" ]]; then
+        printf "Warning: OSTree system detected. Skipping task: %s\n" "${name}" >&2
+        TASK_RESULTS+=("SKIPPED|${name}|skip|${cmd}")
+        TASK_SKIPPED=$((TASK_SKIPPED + 1))
+        TASK_CURRENT=$((TASK_CURRENT + 1))
+        log_transaction_event "TASK_SKIPPED" "${name}"
+        return 0
+    fi
+
+    local exit_code=0
+    if [[ "${FEDORATRICKS_REDIRECT_OUTPUT:-}" == "true" ]] && [[ "${cmd}" =~ fedoratricks ]]; then
+        local log_file
+        log_file=$(get_active_log_file)
+        eval "${cmd}" >>"${log_file}" 2>&1 || exit_code=$?
+    else
+        eval "${cmd}" || exit_code=$?
+    fi
+
+    if [[ ${exit_code} -eq 0 ]]; then
+        TASK_RESULTS+=("PASSED|${name}|${action}|${cmd}")
+        TASK_PASSED=$((TASK_PASSED + 1))
+        log_transaction_event "TASK_COMPLETED" "${name} (PASSED)"
+    else
+        TASK_RESULTS+=("FAILED|${name}|${action}|${cmd}")
+        TASK_FAILED=$((TASK_FAILED + 1))
+        printf "\n  \e[1;31m[!] ERROR: Task '%s' failed with exit code %s. Check /var/log/fedoratricks for details.\e[0m\n" "${name}" "${exit_code}" >&2
+        log_transaction_event "TASK_FAILED" "${name} (Exit Code: ${exit_code})"
+        return ${exit_code}
+    fi
+
+    TASK_CURRENT=$((TASK_CURRENT + 1))
+    return 0
+}
+
+rollback_transaction_tasks() {
+    local i="$1"
+    local name="${TASK_NAMES[i]}"
+    local rollback="${TASK_DISABLE_CMDS[i]}"
+
+    if [[ ${i} -gt 0 || -n "${rollback}" ]]; then
+        local old_log_mode="${CURRENT_LOG_MODE}"
+        CURRENT_LOG_MODE="FEDORATRICKS"
+
+        log_transaction_event "ROLLBACK_START" "Triggered by failure of task: ${name}"
+
+        # Count actual rollback tasks
+        local rollback_count=0
+        local j
+        for ((j = i; j >= 0; j--)); do
+            if [[ -n "${TASK_DISABLE_CMDS[j]}" ]]; then
+                rollback_count=$((rollback_count + 1))
+            fi
+        done
+
+        # Calculate new TASK_TOTAL
+        TASK_TOTAL=$((TASK_CURRENT + rollback_count))
+
+        printf "\n  \e[1;33mStarting rollback...\e[0m\n" >&2
+        for ((j = i; j >= 0; j--)); do
+            local rb_cmd="${TASK_DISABLE_CMDS[j]}"
+            if [[ -n ${rb_cmd} ]]; then
+                CURRENT_TASK_NAME="${TASK_NAMES[j]}"
+                printf "\n  \e[1;31m[%d/%d]\e[0m \e[1;34mUNDO:\e[0m \e[1m%s\e[0m\n" "${TASK_CURRENT}" "${TASK_TOTAL}" "${TASK_NAMES[j]}" >&2
+                log_transaction_event "TASK_ROLLBACK_START" "${TASK_NAMES[j]}"
+                local exit_code=0
+                eval "${rb_cmd}" || exit_code=$?
+                if [[ ${exit_code} -eq 0 ]]; then
+                    log_transaction_event "TASK_ROLLBACK_COMPLETED" "${TASK_NAMES[j]}"
+                else
+                    log_transaction_event "TASK_ROLLBACK_FAILED" "${TASK_NAMES[j]} (Exit Code: ${exit_code})"
+                    printf "        \e[1;31mWarning: Rollback command failed: %s\e[0m\n" "${rb_cmd}" >&2
+                fi
+                TASK_CURRENT=$((TASK_CURRENT + 1))
+            fi
+        done
+        printf "\n  \e[1;32mRollback completed.\e[0m\n" >&2
+        log_transaction_event "ROLLBACK_END" "Rollback completed"
+
+        CURRENT_LOG_MODE="${old_log_mode}"
+    fi
+}
+
+run_transaction_enable() {
+    local total="$1"
+    local i
+    for ((i = 0; i < total; i++)); do
+        local exit_code=0
+        execute_transaction_task "${i}" "enable" || exit_code=$?
+        if [[ ${exit_code} -ne 0 ]]; then
+            rollback_transaction_tasks "${i}"
+            print_task_summary
+            exit ${exit_code}
+        fi
+    done
+}
+
+run_transaction_disable() {
+    local total="$1"
+    local i
+    local defer_rebuild_idx=""
+
+    # Find the rebuild initramfs task to defer
+    for ((i = total - 1; i >= 0; i--)); do
+        if [[ "${TASK_NAMES[i]}" == "Rebuilding initramfs image" ]]; then
+            defer_rebuild_idx="${i}"
+            break
+        fi
+    done
+
+    # Execute all other tasks in reverse order
+    for ((i = total - 1; i >= 0; i--)); do
+        if [[ -n "${defer_rebuild_idx}" && ${i} -eq ${defer_rebuild_idx} ]]; then
+            continue
+        fi
+        local exit_code=0
+        execute_transaction_task "${i}" "disable" || exit_code=$?
+        if [[ ${exit_code} -ne 0 ]]; then
+            print_task_summary
+            exit ${exit_code}
+        fi
+    done
+
+    # Finally, execute the deferred rebuild task at the very end
+    if [[ -n "${defer_rebuild_idx}" ]]; then
+        local exit_code=0
+        execute_transaction_task "${defer_rebuild_idx}" "disable" || exit_code=$?
+        if [[ ${exit_code} -ne 0 ]]; then
+            print_task_summary
+            exit ${exit_code}
+        fi
+    fi
+}
+
+run_transaction() {
+    local action="$1" # "enable", "disable", "install", "remove"
+    local total=${#TASK_NAMES[@]}
+
+    # Initialize task tracking in utils_core
+    init_tasks ${total}
+
+    if [[ ${action} == "enable" || ${action} == "install" ]]; then
+        run_transaction_enable "${total}"
+    elif [[ ${action} == "disable" || ${action} == "remove" ]]; then
+        run_transaction_disable "${total}"
+    fi
+
+    print_task_summary
+}
+
+# Run a command string via eval, printing it in bold dark gray with newlines before and after
+run_cmd_eval() {
+    if [[ $# -eq 3 ]] && [[ "$3" =~ ^(enable|disable|install|remove|config)$ ]]; then
+        run_cmd "$1" "$2" "$3"
+    else
+        local cmd_str="$1"
+        local display_cmd=$(format_cmd_display "${cmd_str}")
+        printf "        \e[1;30m%s\e[0m\n" "${display_cmd}" >&2
+        run_escalated "${cmd_str}"
+    fi
+}
+
+# Source hardware detection utilities
+source "${COMMAND_DIR}/utils_hardware"

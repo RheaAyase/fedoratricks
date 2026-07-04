@@ -1,0 +1,313 @@
+#!/bin/bash
+
+# shellcheck disable=SC2034
+set -Eeuo pipefail
+
+# shellcheck source=/dev/null
+source "${COMMAND_DIR}/utils_core"
+
+nvidiaHelp() {
+    cat <<EOF
+Command Usage: fedoratricks nvidia [action] [options]
+
+Note: This command installs proprietary NVIDIA drivers and configures kernel parameters.
+It requires root privileges. OSTree-based systems (Silverblue/Kinoite) are not supported.
+
+Actions:
+  install          Install NVIDIA drivers and enable persistenced service.
+  remove           Remove NVIDIA drivers and fall back to Nouveau.
+
+Options:
+  -h|--help        Print the help text and exit.
+  --config         Configure driver parameters (sleep, rebar, and earlykms).
+
+Examples:
+  fedoratricks nvidia install
+  fedoratricks nvidia remove
+EOF
+}
+
+# Always define option defaults:
+action=""
+config_enabled=false
+conf_file="/etc/modprobe.d/nvidia-fedoratricks.conf"
+dracut_conf_file="/etc/dracut.conf.d/99-nvidia-fedoratricks.conf"
+
+nvidiaParseArgs() {
+    if [[ $# -eq 0 ]]; then
+        nvidiaHelp
+        exit 1
+    fi
+
+    # The first argument must be the action: install or remove
+    case "$1" in
+    install | remove)
+        action="$1"
+        shift
+        ;;
+    -h | --help)
+        nvidiaHelp
+        exit 0
+        ;;
+    *)
+        printf "Error: First argument must be an action (install or remove). Got '%s'.\n" "$1" >&2
+        exit 1
+        ;;
+    esac
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        -h | --help)
+            nvidiaHelp
+            exit 0
+            ;;
+        --config)
+            config_enabled=true
+            shift
+            ;;
+        *)
+            if [[ $1 == -* ]]; then
+                printf "Unknown option: %s\n" "$1" >&2
+                exit 1
+            else
+                printf "Unknown argument: '%s'. See --help for options.\n" "$1" >&2
+                exit 1
+            fi
+            ;;
+        esac
+    done
+}
+
+# Helper: Configure systemd sleep services and power management options for NVIDIA
+# Modifies the caller's local variable 'needs_initramfs' if configurations change.
+nvidiaSetupSleepConfig() {
+    local action="$1"
+    if [[ ${action} == "enable" || ${action} == "install" ]]; then
+        if [[ -f ${conf_file} ]] &&
+            grep -q "NVreg_EnableS0ixPowerManagement=1" "${conf_file}" &&
+            grep -q "NVreg_PreserveVideoMemoryAllocations=1" "${conf_file}"; then
+            # Already set up, do nothing for sleep
+            track_noop "Configure NVIDIA sleep modprobe options" "SUCCESS (Already configured)"
+        else
+            printf "        Enabling NVIDIA sleep optimizations (S0ix & Memory Preservation)...\n"
+            run_cmd touch "${conf_file}"
+            run_cmd sed -i '/NVreg_EnableS0ixPowerManagement/d' "${conf_file}"
+            run_cmd sed -i '/NVreg_PreserveVideoMemoryAllocations/d' "${conf_file}"
+            run_cmd_eval "printf 'options nvidia NVreg_EnableS0ixPowerManagement=1\noptions nvidia NVreg_PreserveVideoMemoryAllocations=1\n' >> '${conf_file}'"
+            NEEDS_INITRAMFS=true
+        fi
+        run_cmd systemctl enable nvidia-suspend.service nvidia-hibernate.service nvidia-resume.service
+    else
+        local svc_exists=false
+        local svc
+        for svc in nvidia-suspend.service nvidia-hibernate.service nvidia-resume.service; do
+            if systemctl list-unit-files | grep -q "^${svc}" &>/dev/null; then
+                svc_exists=true
+                break
+            fi
+        done
+        if [[ ${svc_exists} == true ]]; then
+            run_cmd systemctl disable nvidia-suspend.service nvidia-hibernate.service nvidia-resume.service || true
+        else
+            track_noop "Disable NVIDIA sleep systemd services" "SUCCESS (Services not present)"
+        fi
+    fi
+}
+
+# Helper: Configure NVIDIA Resizable BAR
+# Modifies the caller's local variable 'needs_initramfs' if configurations change.
+nvidiaSetupRebarConfig() {
+    local action="$1"
+    if [[ ${action} == "enable" || ${action} == "install" ]]; then
+        if [[ -f ${conf_file} ]] && grep -q "NVreg_EnableResizableBar=1" "${conf_file}"; then
+            # Already set up, do nothing for rebar
+            track_noop "Configure NVIDIA Resizable BAR modprobe option" "SUCCESS (Already configured)"
+        else
+            printf "        Enabling NVIDIA Resizable BAR...\n"
+            run_cmd touch "${conf_file}"
+            run_cmd sed -i '/NVreg_EnableResizableBar/d' "${conf_file}"
+            run_cmd_eval "printf 'options nvidia NVreg_EnableResizableBar=1\n' >> '${conf_file}'"
+            NEEDS_INITRAMFS=true
+        fi
+    fi
+}
+
+# Helper: Configure NVIDIA Early KMS via dracut
+# Modifies the caller's local variable 'needs_initramfs' if configurations change.
+nvidiaSetupEarlyKmsConfig() {
+    local action="$1"
+    if [[ ${action} == "enable" || ${action} == "install" ]]; then
+        if [[ -f ${dracut_conf_file} ]] && grep -q "force_drivers" "${dracut_conf_file}"; then
+            # Already set up, do nothing for earlykms
+            track_noop "Configure NVIDIA Early KMS dracut option" "SUCCESS (Already configured)"
+        else
+            printf "        Enabling NVIDIA Early KMS...\n"
+            run_cmd mkdir -p /etc/dracut.conf.d
+            run_cmd_eval "printf 'force_drivers+=\" nvidia nvidia_modeset nvidia_uvm nvidia_drm \"\n' > '${dracut_conf_file}'"
+            NEEDS_INITRAMFS=true
+        fi
+    else
+        if [[ -f ${dracut_conf_file} ]]; then
+            run_cmd rm -f "${dracut_conf_file}"
+            NEEDS_INITRAMFS=true
+        else
+            track_noop "Remove NVIDIA Early KMS dracut config: ${dracut_conf_file}" "SUCCESS (Already removed)"
+        fi
+    fi
+}
+
+nvidiaSetupConfig() {
+    local action="$1"
+
+    if [[ ${action} == "disable" || ${action} == "remove" ]]; then
+        local needs_revert=false
+        if [[ -f ${conf_file} || -f ${dracut_conf_file} ]]; then
+            needs_revert=true
+        fi
+        local svc
+        for svc in nvidia-suspend.service nvidia-hibernate.service nvidia-resume.service; do
+            if systemctl list-unit-files | grep -q "^${svc}" &>/dev/null; then
+                needs_revert=true
+                break
+            fi
+        done
+
+        if [[ ${needs_revert} == false ]]; then
+            printf "        NVIDIA configurations are already reverted.\n"
+            track_noop "Revert NVIDIA configurations" "SUCCESS (Already reverted)"
+            return 0
+        fi
+
+        printf "        Reverting NVIDIA custom configurations...\n"
+    fi
+
+    # Execute modular configuration components
+    nvidiaSetupSleepConfig "${action}"
+    nvidiaSetupRebarConfig "${action}"
+    nvidiaSetupEarlyKmsConfig "${action}"
+
+    if [[ ${action} == "disable" || ${action} == "remove" ]]; then
+        if [[ -f ${conf_file} ]]; then
+            run_cmd rm -f "${conf_file}"
+            NEEDS_INITRAMFS=true
+        else
+            track_noop "Remove NVIDIA sleep config file: ${conf_file}" "SUCCESS (Already removed)"
+        fi
+    fi
+}
+
+nvidiaSetupDriver() {
+    local action="$1"
+    if [[ ${action} == "enable" || ${action} == "install" ]]; then
+        local nvidia_gen
+        nvidia_gen=$(detect_nvidia_gen)
+
+        printf "        Installing NVIDIA drivers (Branch: %s)...\n" "${nvidia_gen}"
+
+        local target_akmod=""
+        local target_cuda=""
+
+        if [[ ${nvidia_gen} == "current" ]]; then
+            target_akmod="akmod-nvidia"
+            target_cuda="xorg-x11-drv-nvidia-cuda"
+        elif [[ ${nvidia_gen} == "580xx" ]]; then
+            target_akmod="akmod-nvidia-580xx"
+            target_cuda="xorg-x11-drv-nvidia-580xx-cuda"
+        elif [[ ${nvidia_gen} == "470xx" ]]; then
+            target_akmod="akmod-nvidia-470xx"
+            target_cuda="xorg-x11-drv-nvidia-470xx-cuda"
+        fi
+
+        # Pre-check if packages are already installed to avoid slow DNF runs
+        if ! rpm -q "${target_akmod}" "${target_cuda}" &>/dev/null; then
+            run_cmd dnf install -y "${target_akmod}" "${target_cuda}" || return $?
+        else
+            track_noop "Install NVIDIA driver packages" "SUCCESS (Already installed)"
+        fi
+
+        if systemctl list-unit-files | grep -q "^nvidia-persistenced.service" &>/dev/null; then
+            printf "        Enabling nvidia-persistenced service...\n"
+            run_cmd systemctl enable --now nvidia-persistenced.service || printf "Warning: Could not enable nvidia-persistenced.\n" >&2
+        fi
+
+        printf "        \e[1;31mATTENTION: Please wait 5-10 minutes before rebooting to allow AKMOD to compile the driver.\e[0m\n"
+    else
+        local needs_remove=false
+        if [[ -n "$(rpm -qa "akmod-nvidia*" "xorg-x11-drv-nvidia*")" ]]; then
+            needs_remove=true
+        fi
+        if systemctl list-unit-files | grep -q "^nvidia-persistenced.service" &>/dev/null; then
+            needs_remove=true
+        fi
+
+        if [[ ${needs_remove} == false ]]; then
+            printf "        NVIDIA drivers and utilities are already removed.\n"
+            track_noop "Remove NVIDIA drivers" "SUCCESS (Already removed)"
+            return 0
+        fi
+
+        printf "        Removing proprietary NVIDIA drivers and utilities...\n"
+
+        if [[ -n "$(rpm -qa "akmod-nvidia*" "xorg-x11-drv-nvidia*")" ]]; then
+            run_cmd dnf remove -y "akmod-nvidia*" "xorg-x11-drv-nvidia*" || return $?
+        else
+            track_noop "Remove NVIDIA driver packages" "SUCCESS (Already removed)"
+        fi
+
+        if systemctl list-unit-files | grep -q "^nvidia-persistenced.service" &>/dev/null; then
+            printf "        Disabling nvidia-persistenced service...\n"
+            run_cmd systemctl disable --now nvidia-persistenced.service || true
+        else
+            track_noop "Disable nvidia-persistenced service" "SUCCESS (Service not present)"
+        fi
+
+        printf "\n        \e[1;33mNVIDIA drivers uninstalled successfully. Please reboot to fall back to open-source Nouveau drivers.\e[0m\n"
+    fi
+}
+
+# Main Command Execution
+nvidiaExecute() {
+    log_print "  \e[1;34mManaging proprietary NVIDIA drivers and kernel configurations...\e[0m\n"
+
+    validate_environment "nvidia" "nvidia install"
+
+    nvidiaParseArgs "$@"
+
+    if [[ ${action} == "install" ]]; then
+        if ! lspci | grep -i 'vga\|3d' | grep -i nvidia &>/dev/null; then
+            printf "  Error: No NVIDIA GPU detected on this system. Cannot install NVIDIA drivers.\n" >&2
+            exit 1
+        fi
+        check_and_install_rpmfusion
+    fi
+
+    # 1. Register NVIDIA Drivers Task
+    register_task "NVIDIA proprietary drivers" \
+        "nvidiaSetupDriver install" \
+        "nvidiaSetupDriver remove" \
+        "allow"
+
+    # 2. Register NVIDIA Config Task
+    if [[ ${config_enabled} == true ]]; then
+        register_task "NVIDIA driver configurations" \
+            "nvidiaSetupConfig install" \
+            "nvidiaSetupConfig remove" \
+            "allow"
+    fi
+
+    # 3. Register Initramfs Rebuild Task if config was enabled
+    if [[ ${config_enabled} == true ]]; then
+        register_task "Rebuilding initramfs image" \
+            "run_initramfs_rebuild install" \
+            "run_initramfs_rebuild remove" \
+            "skip"
+    fi
+
+    # 4. Run the transaction!
+    run_transaction "${action}"
+}
+
+nvidiaCleanup() {
+    printf "Cleaned up after <nvidia>\n"
+    exit 2
+}

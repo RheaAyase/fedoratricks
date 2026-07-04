@@ -1,0 +1,402 @@
+#!/bin/bash
+
+# shellcheck disable=SC2034
+set -Eeuo pipefail
+
+# shellcheck source=/dev/null
+source "${COMMAND_DIR}/utils_core"
+
+multimediaHelp() {
+    cat <<EOF
+Command Usage: fedoratricks multimedia [action] [options]
+
+Note: This command modifies system packages and requires root privileges.
+OSTree-based systems (Silverblue/Kinoite) are not supported.
+
+Actions:
+  install          Install multimedia codecs and apply configurations.
+  remove           Remove installed multimedia codecs and revert configurations.
+
+Options:
+  -h, --help       Print the help text and exit.
+  --config         (Intel only) Configure hardware acceleration modules (GuC/HuC).
+  --with-optional  Install optional/extra multimedia packages based on hardware.
+
+Examples:
+  fedoratricks multimedia install
+  fedoratricks multimedia remove
+EOF
+}
+
+# Define defaults and configuration arrays
+action=""
+vendors=()
+intel_gen=""
+config_enabled=false
+with_optional=false
+
+readonly MULTIMEDIA_BASE_CODECS=(
+    sox
+    sox-plugins-nonfree
+    svt-av1
+    gstreamer1-svt-av1
+    gstreamer1-svt-vp9
+    svt-vp9
+    libheif
+    libheif-freeworld
+    rav1e
+    dav1d
+    vkd3d-compiler
+)
+
+readonly MULTIMEDIA_NVIDIA_EXTRAS=(
+    libva-nvidia-driver
+    libva-utils
+    vdpauinfo
+    nvidia-query-resource-opengl
+    nvidia-texture-tools
+    freeglut-devel
+    libX11-devel
+    libXi-devel
+    libXmu-devel
+    make
+    mesa-libGLU-devel
+    freeimage-devel
+    glfw
+)
+
+# Argument Parser
+multimediaParseArgs() {
+    if [[ $# -eq 0 ]]; then
+        multimediaHelp
+        exit 1
+    fi
+
+    # The first argument must be the action: install or remove
+    case "$1" in
+    install | remove)
+        action="$1"
+        shift
+        ;;
+    -h | --help)
+        multimediaHelp
+        exit 0
+        ;;
+    *)
+        printf "Error: First argument must be an action (install or remove). Got '%s'.\n" "$1" >&2
+        exit 1
+        ;;
+    esac
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        -h | --help)
+            multimediaHelp
+            exit 0
+            ;;
+        --config)
+            config_enabled=true
+            shift
+            ;;
+        --with-optional)
+            with_optional=true
+            shift
+            ;;
+        *)
+            if [[ $1 == -* ]]; then
+                printf "Unknown option: %s\n" "$1" >&2
+                exit 1
+            else
+                printf "Unknown argument: '%s'. This command does not accept vendor arguments.\n" "$1" >&2
+                exit 1
+            fi
+            ;;
+        esac
+    done
+}
+
+multimediaSetupIntelDriver() {
+    local action="$1"
+    if [[ ${intel_gen} == "pre-skylake" ]]; then
+        if [[ ${action} == "enable" || ${action} == "install" ]]; then
+            if ! rpm -q libva-intel-driver &>/dev/null; then
+                run_cmd dnf install -y libva-intel-driver --skip-unavailable || return $?
+            else
+                printf "        libva-intel-driver is already installed.\n"
+                track_noop "Install libva-intel-driver" "SUCCESS (Already installed)"
+            fi
+        else
+            if rpm -q libva-intel-driver &>/dev/null; then
+                run_cmd dnf remove -y libva-intel-driver || true
+            else
+                track_noop "Remove libva-intel-driver" "SUCCESS (Already removed)"
+            fi
+        fi
+        return 0
+    fi
+
+    local intel_pkgs=(intel-media-driver)
+    if [[ ${intel_gen} == "tigerlake" ]]; then
+        intel_pkgs+=(intel-vpl-gpu-rt)
+    fi
+
+    if [[ ${action} == "enable" || ${action} == "install" ]]; then
+        if ! rpm -q "${intel_pkgs[@]}" &>/dev/null; then
+            run_cmd dnf install -y "${intel_pkgs[@]}" --skip-unavailable || return $?
+        else
+            printf "        Intel media driver packages are already installed.\n"
+            track_noop "Install Intel media driver packages" "SUCCESS (Already installed)"
+        fi
+    else
+        local pkg installed=false
+        for pkg in "${intel_pkgs[@]}"; do
+            if rpm -q "${pkg}" &>/dev/null; then
+                installed=true
+                break
+            fi
+        done
+        if [[ ${installed} == true ]]; then
+            run_cmd dnf remove -y "${intel_pkgs[@]}" || true
+        else
+            track_noop "Remove Intel media driver packages" "SUCCESS (Already removed)"
+        fi
+    fi
+}
+
+multimediaSetupIntelConfig() {
+    local action="$1"
+    if [[ ! ${intel_gen} =~ ^(skylake|tigerlake)$ ]]; then
+        if [[ ${action} == "enable" || ${action} == "install" ]]; then
+            printf "GuC/HuC configuration is not supported or required for pre-skylake Intel CPUs.\n"
+        fi
+        return 0
+    fi
+
+    local conf_file="/etc/modprobe.d/intel-fedoratricks.conf"
+
+    if [[ ${action} == "enable" || ${action} == "install" ]]; then
+        local guc_ver="2"
+        if [[ ${intel_gen} == "tigerlake" ]]; then
+            guc_ver="3"
+        fi
+
+        if [[ -f ${conf_file} ]]; then
+            printf "        Intel hardware acceleration is already configured.\n"
+            track_noop "Configure Intel hardware acceleration modprobe options" "SUCCESS (Already configured)"
+            return 0
+        fi
+
+        printf "        Configuring Intel hardware acceleration modules:\n"
+        run_cmd_eval "printf 'options i915 enable_guc=%s\noptions i915 enable_fbc=1\n' '${guc_ver}' > '${conf_file}'"
+        NEEDS_INITRAMFS=true
+    else
+        if [[ -f ${conf_file} ]]; then
+            printf "        Reverting Intel modprobe configurations:\n"
+            run_cmd rm -f "${conf_file}"
+            NEEDS_INITRAMFS=true
+        else
+            printf "        Intel hardware acceleration is already reverted.\n"
+            track_noop "Remove Intel hardware acceleration modprobe config: ${conf_file}" "SUCCESS (Already removed)"
+        fi
+    fi
+}
+
+multimediaSetupAmdDriver() {
+    local action="$1"
+    if [[ ${with_optional} != true ]]; then
+        return 0
+    fi
+
+    local exit_code=0
+    if [[ ${action} == "enable" || ${action} == "install" ]]; then
+        if ! rpm -q mesa-va-drivers-freeworld mesa-vdpau-drivers-freeworld &>/dev/null; then
+            run_cmd dnf install -y mesa-va-drivers-freeworld mesa-vdpau-drivers-freeworld --allowerasing --skip-unavailable || exit_code=$?
+        else
+            printf "        AMD mesa freeworld drivers are already installed.\n"
+            track_noop "Install AMD mesa freeworld drivers" "SUCCESS (Already installed)"
+        fi
+    else
+        if rpm -q mesa-va-drivers-freeworld &>/dev/null || rpm -q mesa-vdpau-drivers-freeworld &>/dev/null; then
+            printf "        Reverting mesa drivers:\n"
+            run_cmd dnf install -y mesa-va-drivers mesa-vdpau-drivers --allowerasing --skip-unavailable || exit_code=$?
+        else
+            printf "        AMD mesa freeworld drivers are already reverted.\n"
+            track_noop "Revert AMD mesa freeworld drivers" "SUCCESS (Already reverted)"
+        fi
+    fi
+    return ${exit_code}
+}
+
+multimediaSetupNvidiaDriver() {
+    local action="$1"
+    if [[ ${with_optional} != true ]]; then
+        return 0
+    fi
+
+    if [[ ${action} == "enable" || ${action} == "install" ]]; then
+        if ! rpm -q "${MULTIMEDIA_NVIDIA_EXTRAS[@]}" &>/dev/null; then
+            run_cmd dnf install -y "${MULTIMEDIA_NVIDIA_EXTRAS[@]}" --skip-unavailable || return $?
+        else
+            printf "        NVIDIA multimedia extras packages are already installed.\n"
+            track_noop "Install NVIDIA multimedia extras packages" "SUCCESS (Already installed)"
+        fi
+    else
+        local pkg installed=false
+        for pkg in "${MULTIMEDIA_NVIDIA_EXTRAS[@]}"; do
+            if rpm -q "${pkg}" &>/dev/null; then
+                installed=true
+                break
+            fi
+        done
+        if [[ ${installed} == true ]]; then
+            run_cmd dnf remove -y "${MULTIMEDIA_NVIDIA_EXTRAS[@]}" || true
+        else
+            printf "        NVIDIA multimedia extras packages are already removed.\n"
+            track_noop "Remove NVIDIA multimedia extras packages" "SUCCESS (Already removed)"
+        fi
+    fi
+}
+
+multimediaSetupBase() {
+    local action="$1"
+    if [[ ${action} == "enable" || ${action} == "install" ]]; then
+        run_cmd dnf install -y ffmpeg @multimedia --skip-unavailable --allowerasing || return $?
+    else
+        run_cmd dnf install -y ffmpeg-free @multimedia --disablerepo="rpmfusion*" --allowerasing --skip-unavailable || return $?
+    fi
+}
+
+multimediaSetupOptional() {
+    local action="$1"
+    if [[ ${action} == "enable" || ${action} == "install" ]]; then
+        if ! rpm -q "${MULTIMEDIA_BASE_CODECS[@]}" &>/dev/null; then
+            run_cmd dnf install -y "${MULTIMEDIA_BASE_CODECS[@]}" --skip-unavailable || return $?
+        else
+            printf "        Optional system codecs are already installed.\n"
+            track_noop "Install optional system codecs" "SUCCESS (Already installed)"
+        fi
+    else
+        local pkg installed=false
+        for pkg in "${MULTIMEDIA_BASE_CODECS[@]}"; do
+            if rpm -q "${pkg}" &>/dev/null; then
+                installed=true
+                break
+            fi
+        done
+
+        if [[ ${installed} == true ]]; then
+            run_cmd dnf remove -y "${MULTIMEDIA_BASE_CODECS[@]}" || return $?
+        else
+            printf "        Optional system codecs are already removed.\n"
+            track_noop "Remove optional system codecs" "SUCCESS (Already removed)"
+        fi
+    fi
+}
+
+multimediaSetupVendorDrivers() {
+    local vendor="$1"
+    local action="$2"
+    case "${vendor}" in
+    intel) multimediaSetupIntelDriver "${action}" ;;
+    amd) multimediaSetupAmdDriver "${action}" ;;
+    nvidia) multimediaSetupNvidiaDriver "${action}" ;;
+    esac
+}
+
+multimediaSetupVendorConfigs() {
+    local vendor="$1"
+    local action="$2"
+    case "${vendor}" in
+    intel) multimediaSetupIntelConfig "${action}" ;;
+    esac
+}
+
+# Main Command Execution
+multimediaExecute() {
+    log_print "  \e[1;34mManaging system multimedia codecs...\e[0m\n"
+
+    validate_environment "multimedia" "multimedia install"
+
+    multimediaParseArgs "$@"
+
+    log_print "  Detecting system GPUs...\n"
+    detect_gpus
+    vendors+=("${DETECTED_GPUS[@]}")
+    if [[ ${#vendors[@]} -eq 0 ]]; then
+        printf "  Error: No supported GPU detected.\n" >&2
+        exit 1
+    fi
+    log_print "    Detected GPU target(s): %s\n" "${vendors[*]}"
+
+    local has_intel=false
+    local check_vendor
+    for check_vendor in "${vendors[@]}"; do
+        if [[ ${check_vendor} == "intel" ]]; then
+            has_intel=true
+            break
+        fi
+    done
+
+    if [[ ${has_intel} == true && -z ${intel_gen} ]]; then
+        intel_gen=$(detect_intel_gen)
+    fi
+
+    # Block installation if RPM Fusion is missing
+    if [[ ${action} == "install" ]]; then
+        check_and_install_rpmfusion
+    fi
+
+    # 1. Register base codecs task
+    register_task "Base codecs (ffmpeg, @multimedia)" \
+        "multimediaSetupBase install" \
+        "multimediaSetupBase remove" \
+        "skip"
+
+    # 2. Register optional system codecs task
+    if [[ ${with_optional} == true ]]; then
+        register_task "Optional system codecs (${MULTIMEDIA_BASE_CODECS[*]})" \
+            "multimediaSetupOptional install" \
+            "multimediaSetupOptional remove" \
+            "skip"
+    fi
+
+    # 3. Register optional hardware-specific driver package task
+    if [[ ${with_optional} == true ]]; then
+        local vendor
+        for vendor in "${vendors[@]}"; do
+            register_task "Optional hardware driver for ${vendor}" \
+                "multimediaSetupVendorDrivers ${vendor} install" \
+                "multimediaSetupVendorDrivers ${vendor} remove" \
+                "skip"
+        done
+    fi
+
+    # 4. Register hardware acceleration configuration task
+    if [[ ${config_enabled} == true ]]; then
+        local vendor
+        for vendor in "${vendors[@]}"; do
+            if [[ ${vendor} == "intel" ]]; then
+                register_task "Hardware acceleration configuration for ${vendor}" \
+                    "multimediaSetupVendorConfigs ${vendor} install" \
+                    "multimediaSetupVendorConfigs ${vendor} remove" \
+                    "skip"
+            fi
+        done
+    fi
+
+    # 5. Register Initramfs Rebuild Task if config was enabled
+    if [[ ${config_enabled} == true ]]; then
+        register_task "Rebuilding initramfs image" \
+            "run_initramfs_rebuild install" \
+            "run_initramfs_rebuild remove" \
+            "skip"
+    fi
+
+    # 4. Run the transaction!
+    run_transaction "${action}"
+}
+
+multimediaCleanup() {
+    printf "Cleaned up after <multimedia>\n"
+    exit 2
+}

@@ -1,0 +1,122 @@
+#!/bin/bash
+
+# shellcheck disable=SC2034
+
+# Hardware detection helper functions for fedoratricks
+
+# 1. Detect available GPUs (sets DETECTED_GPUS, HAS_INTEL_GPU, HAS_AMD_GPU, HAS_NVIDIA_GPU)
+detect_gpus() {
+    HAS_INTEL_GPU=false
+    HAS_AMD_GPU=false
+    HAS_NVIDIA_GPU=false
+    DETECTED_GPUS=()
+
+    local pci_info
+    if ! pci_info=$(lspci | grep -i 'vga\|3d' 2>/dev/null); then
+        return
+    fi
+
+    while read -r line; do
+        if [[ -z "${line}" ]]; then
+            continue
+        fi
+        if grep -qi 'intel' <<<"${line}"; then
+            HAS_INTEL_GPU=true
+            if [[ ! " ${DETECTED_GPUS[*]} " =~ " intel " ]]; then
+                DETECTED_GPUS+=("intel")
+            fi
+        elif grep -qi 'amd\|radeon\|advanced micro devices' <<<"${line}"; then
+            HAS_AMD_GPU=true
+            if [[ ! " ${DETECTED_GPUS[*]} " =~ " amd " ]]; then
+                DETECTED_GPUS+=("amd")
+            fi
+        elif grep -qi 'nvidia' <<<"${line}"; then
+            HAS_NVIDIA_GPU=true
+            if [[ ! " ${DETECTED_GPUS[*]} " =~ " nvidia " ]]; then
+                DETECTED_GPUS+=("nvidia")
+            fi
+        fi
+    done <<<"${pci_info}"
+}
+
+# 2. Detect Intel CPU generation
+detect_intel_gen() {
+    log_print "        Detecting Intel CPU generation:\n"
+
+    local model_name=""
+    if ! model_name=$(grep -m 1 -i 'model name' /proc/cpuinfo | cut -d ':' -f 2 | xargs); then
+        log_print "        Error: Failed to read processor information from /proc/cpuinfo.\n"
+        exit 1
+    fi
+
+    log_print "          Target CPU: \e[1m%s\e[0m\n" "${model_name}"
+
+    local gen="unknown"
+    if grep -qi "Core Ultra" <<<"${model_name}"; then
+        gen="tigerlake"
+    elif [[ ${model_name} =~ [iI][3579]-([0-9]{3,5}) ]]; then
+        local num="${BASH_REMATCH[1]}"
+        local len="${#num}"
+
+        if ((len == 3)); then
+            gen="pre-skylake"
+        elif ((len == 4)); then
+            local prefix_gen="${num:0:1}"
+            if ((prefix_gen < 6)); then
+                gen="pre-skylake"
+            else
+                gen="skylake"
+            fi
+        elif ((len == 5)); then
+            local prefix_gen="${num:0:2}"
+            if ((prefix_gen >= 11)); then
+                gen="tigerlake"
+            else
+                gen="unknown"
+            fi
+        fi
+    fi
+
+    if [[ ${gen} == "unknown" ]]; then
+        log_print "        Error: Could not automatically determine Intel CPU generation family.\n"
+        exit 1
+    fi
+
+    log_print "          Detected family: \e[1m%s\e[0m\n" "${gen}"
+    echo "${gen}"
+}
+
+# 3. Detect NVIDIA GPU generation
+detect_nvidia_gen() {
+    log_print "        Detecting NVIDIA GPU generation...\n"
+
+    local gpu_info=""
+    if ! gpu_info=$(lspci | grep -i 'vga\|3d' | grep -i nvidia 2>/dev/null); then
+        log_print "        Warning: Failed to read PCI devices or no NVIDIA GPU found.\n"
+        echo "unknown"
+        return
+    fi
+
+    log_print "          Found GPU: \e[1m%s\e[0m\n" "${gpu_info}"
+
+    local gen="unknown"
+    # Turing, Ampere, Ada, Blackwell and newer (RTX 20+, GTX 16xx)
+    if grep -qiE 'RTX|GTX 16[0-9][0-9]|MX[2345][0-9][0-9]|T[0-9][0-9][0-9]|A[0-9][0-9][0-9][0-9]' <<<"${gpu_info}"; then
+        gen="current"
+    # Maxwell & Pascal (GTX 800/900/10xx)
+    elif grep -qiE 'GTX 10[0-9][0-9]|GTX 9[0-9][0-9]|GTX 8[0-9][0-9]|MX1[0-9][0-9]|Quadro P|Quadro M|Pascal|Maxwell' <<<"${gpu_info}"; then
+        gen="580xx"
+    # Kepler (GTX 600/700)
+    elif grep -qiE 'GTX 7[0-9][0-9]|GTX 6[0-9][0-9]|Quadro K|Kepler' <<<"${gpu_info}"; then
+        gen="470xx"
+    fi
+
+    if [[ ${gen} == "unknown" ]]; then
+        log_print "        Error: Could not automatically determine NVIDIA GPU generation family.\n"
+        log_print "        Please specify manually using --current, --legacy-580xx, or --legacy-470xx.\n"
+        exit 1
+    fi
+
+    log_print "          Detected family: \e[1m%s\e[0m\n" "${gen}"
+    echo "${gen}"
+}

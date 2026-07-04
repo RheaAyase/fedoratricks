@@ -2,12 +2,11 @@
 
 set -Eeuo pipefail
 cleanup() {
-  templateCleanup
+    templateCleanup
 }
 
-
 templateHelp() {
-  cat <<EOF
+    cat <<EOF
 Command Usage: fedoratricks template [options]
 
 Options:
@@ -22,33 +21,32 @@ exampleValue="defaultValue"
 exampleBool=false
 
 templateExecute() {
-  echo "Executing <template>"
+    echo "Executing <template>"
 
-  while [[ $# -gt 0 ]]; do
-    case $1 in
-      -v|--value)
-        exampleValue="$2"
-        shift 2
-        ;;
-      -b|--boolean)
-        exampleBool=true
-        shift
-        ;;
-      *)
-        echo "Unknown option $1"
-        exit 1
-        ;;
-    esac
-  done
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+        -v | --value)
+            exampleValue="$2"
+            shift 2
+            ;;
+        -b | --boolean)
+            exampleBool=true
+            shift
+            ;;
+        *)
+            echo "Unknown option $1"
+            exit 1
+            ;;
+        esac
+    done
 
-  # DO STUFF
-  echo "-b: ${exampleBool}"
-  echo "-v: ${exampleValue}"
+    # DO STUFF
+    echo "-b: ${exampleBool}"
+    echo "-v: ${exampleValue}"
 }
 
 templateCleanup() {
-  # Triggered automatically in case of an unexpected error.
-  echo "Cleaned up after <template>"
-  exit 2
+    # Triggered automatically in case of an unexpected error.
+    echo "Cleaned up after <template>"
+    exit 2
 }
-

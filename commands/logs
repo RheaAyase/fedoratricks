@@ -1,22 +1,36 @@
 #!/bin/bash
 
 set -Eeuo pipefail
-cleanup() {
-  logsCleanup
-}
 
+# Source core utilities for task tracking and colors
+# shellcheck source=/dev/null
+source "${COMMAND_DIR}/utils_core"
 
 logsHelp() {
-  cat <<EOF
+    cat <<EOF
 Command Usage: fedoratricks logs [options]
 
 Options:
--h|--help     Print the help text and exit.
--a|--all      Save dmesg as well as journal current and last boot.
--0|--current  Save the current boot logs (default)
--1|--lastboot Save the previous boot logs.
--d|--dmesg    Save the dmesg output.
--f|--file     File path where to save the logs. Default ~/Downloads/
+  -h|--help          Print the help text and exit.
+  -a|--all           Save dmesg as well as journal current and last boot.
+  -0|--current       Save the current boot logs (default).
+  -1|--lastboot      Save the previous boot logs.
+  -d|--dmesg         Save the dmesg output.
+  -f|--file <path>   File path where to save the logs. If not specified, logs print to terminal.
+
+Inxi System Info Options:
+  -i|--inxi          Gather system configuration via inxi.
+  --basic|--system   Show basic system info (default for inxi).
+  --drivers          Show graphics, audio, and network drivers.
+  --kernel-modules   Show system kernel and kernel module details.
+  --network          Show network device and interface info.
+  --usb              Show USB device info.
+  --pcie             Show PCI/PCIe slot info.
+
+Examples:
+  fedoratricks logs --all
+  fedoratricks logs --inxi --drivers
+  fedoratricks logs -f ~/Logs/ --inxi --basic --usb
 EOF
 }
 
@@ -24,68 +38,234 @@ EOF
 current=false
 lastboot=false
 dmesg=false
-datetime=$(date '+%Y-%m-%d_%H-%M-%S');
-if [[ -d ${HOME}/Downloads ]]; then
-  path="${HOME}/Downloads"
-else
-  path="${HOME}"
-fi
+inxi=false
+
+inxi_basic=false
+inxi_drivers=false
+inxi_kernel=false
+inxi_network=false
+inxi_usb=false
+inxi_pcie=false
+
+datetime=$(date '+%Y-%m-%d_%H-%M-%S')
+path=""
+
+logsParseArgs() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        -f | --file)
+            if [[ $# -lt 2 ]]; then
+                printf "Error: -f|--file option requires a path argument.\n" >&2
+                exit 1
+            fi
+            path="$2"
+            shift 2
+            ;;
+        -a | --all)
+            current=true
+            lastboot=true
+            dmesg=true
+            shift
+            ;;
+        -0 | --current)
+            current=true
+            shift
+            ;;
+        -1 | --lastboot)
+            lastboot=true
+            shift
+            ;;
+        -d | --dmesg)
+            dmesg=true
+            shift
+            ;;
+        -i | --inxi)
+            inxi=true
+            shift
+            ;;
+        --basic | --system)
+            inxi=true
+            inxi_basic=true
+            shift
+            ;;
+        --drivers)
+            inxi=true
+            inxi_drivers=true
+            shift
+            ;;
+        --kernel-modules | --modules)
+            inxi=true
+            inxi_kernel=true
+            shift
+            ;;
+        --network)
+            inxi=true
+            inxi_network=true
+            shift
+            ;;
+        --usb)
+            inxi=true
+            inxi_usb=true
+            shift
+            ;;
+        --pcie)
+            inxi=true
+            inxi_pcie=true
+            shift
+            ;;
+        -h | --help)
+            logsHelp
+            exit 0
+            ;;
+        *)
+            printf "Unknown option: %s\n" "$1" >&2
+            exit 1
+            ;;
+        esac
+    done
+}
+
+logsSaveDmesg() {
+    if [[ -n ${path} ]]; then
+        printf "        Saving dmesg to %s/dmesg_%s.log\n" "${path}" "${datetime}" >&2
+        if [[ ${EUID} -eq 0 ]]; then
+            run_cmd_eval "dmesg -H &> '${path}/dmesg_${datetime}.log'"
+        else
+            run_cmd_eval "sudo dmesg -H &> '${path}/dmesg_${datetime}.log'"
+        fi
+    else
+        if [[ ${EUID} -eq 0 ]]; then
+            run_cmd dmesg -H
+        else
+            run_cmd sudo dmesg -H
+        fi
+    fi
+}
+
+logsSaveCurrent() {
+    if [[ -n ${path} ]]; then
+        printf "        Saving current journal to %s/current_%s.log\n" "${path}" "${datetime}" >&2
+        run_cmd_eval "journalctl -b 0 &> '${path}/current_${datetime}.log'"
+    else
+        run_cmd journalctl -b 0
+    fi
+}
+
+logsSaveLastboot() {
+    if [[ -n ${path} ]]; then
+        printf "        Saving previous journal to %s/lastboot_%s.log\n" "${path}" "${datetime}" >&2
+        run_cmd_eval "journalctl -b -1 &> '${path}/lastboot_${datetime}.log'"
+    else
+        run_cmd journalctl -b -1
+    fi
+}
+
+logsRunInxi() {
+    local flags=("$@")
+    if [[ -n ${path} ]]; then
+        printf "        Saving inxi output (flags: %s) to %s/inxi_%s.log\n" "${flags[*]}" "${path}" "${datetime}" >&2
+        if [[ ${inxi_pcie} == true ]]; then
+            if [[ ${EUID} -eq 0 ]]; then
+                run_cmd_eval "inxi ${flags[*]} &> '${path}/inxi_${datetime}.log'"
+            else
+                run_cmd_eval "sudo inxi ${flags[*]} &> '${path}/inxi_${datetime}.log'"
+            fi
+        else
+            run_cmd_eval "inxi ${flags[*]} &> '${path}/inxi_${datetime}.log'"
+        fi
+    else
+        if [[ ${inxi_pcie} == true ]]; then
+            if [[ ${EUID} -eq 0 ]]; then
+                run_cmd inxi "${flags[@]}"
+            else
+                run_cmd sudo inxi "${flags[@]}"
+            fi
+        else
+            run_cmd inxi "${flags[@]}"
+        fi
+    fi
+}
 
 logsExecute() {
-  while [[ $# -gt 0 ]]; do
-    case $1 in
-      -f|--file)
-        path="$2"
-        shift 2
-        ;;
-      -a|--all)
-        current=true
-        lastboot=true
-        dmesg=true
-        shift
-        ;;
-      -0|--current)
-        current=true
-        shift
-        ;;
-      -1|--lastboot)
-        lastboot=true
-        shift
-        ;;
-      -d|--dmesg)
-        dmesg=true
-        shift
-        ;;
-      *)
-        echo "Unknown option $1"
-        exit 1
-        ;;
-    esac
-  done
+    logsParseArgs "$@"
 
-  # DO STUFF
-  if [[ ${dmesg} == false && ${lastboot} == false ]]; then
-    current=true
-  fi
+    export FEDORATRICKS_REDIRECT_OUTPUT="false"
+    export FEDORATRICKS_SILENT_SUMMARY="true"
 
-  if [[ ${dmesg} == true ]]; then
-    echo "$ sudo dmesg -H &> ${path}/dmesg_${datetime}.log"
-    pkexec dmesg -H &> ${path}/dmesg_${datetime}.log
-  fi
-  if [[ ${current} == true ]] ; then
-    echo "$ journalctl -b 0 &> ${path}/current_${datetime}.log"
-    journalctl -b 0 &> ${path}/current_${datetime}.log
-  fi
-  if [[ ${lastboot} == true ]] ; then
-    echo "$ journalctl -b -1 &> ${path}/lastboot_${datetime}.log"
-    journalctl -b -1 &> ${path}/lastboot_${datetime}.log
-  fi
-  echo "Saved support logs to ${path}"
+    # If writing to files, print start header to stderr
+    if [[ -n ${path} ]]; then
+        printf "  \e[1;34mGathering system logs and diagnostics...\e[0m\n" >&2
+    fi
+
+    # Set defaults if no actions selected
+    if [[ ${dmesg} == false && ${lastboot} == false && ${inxi} == false ]]; then
+        current=true
+    fi
+
+    local task_count=0
+    if [[ ${dmesg} == true ]]; then task_count=$((task_count + 1)); fi
+    if [[ ${current} == true ]]; then task_count=$((task_count + 1)); fi
+    if [[ ${lastboot} == true ]]; then task_count=$((task_count + 1)); fi
+    if [[ ${inxi} == true ]]; then task_count=$((task_count + 1)); fi
+
+    init_tasks "${task_count}"
+
+    # Set up command display strings depending on file saving path
+    local dmesg_display_cmd="sudo dmesg -H"
+    local current_display_cmd="journalctl -b 0"
+    local lastboot_display_cmd="journalctl -b -1"
+    local inxi_args=()
+    if [[ ${inxi} == true ]]; then
+        if [[ ${inxi_basic} == true ]]; then inxi_args+=("-Fz"); fi
+        if [[ ${inxi_drivers} == true ]]; then inxi_args+=("-G" "-A" "-N"); fi
+        if [[ ${inxi_kernel} == true ]]; then inxi_args+=("-Sa"); fi
+        if [[ ${inxi_network} == true ]]; then inxi_args+=("-N"); fi
+        if [[ ${inxi_usb} == true ]]; then inxi_args+=("--usb"); fi
+        if [[ ${inxi_pcie} == true ]]; then inxi_args+=("--slots"); fi
+        if [[ ${#inxi_args[@]} -eq 0 ]]; then
+            inxi_args+=("-Fz")
+        fi
+    fi
+    local inxi_display_cmd="inxi ${inxi_args[*]:-}"
+    if [[ ${inxi_pcie} == true ]]; then
+        inxi_display_cmd="sudo inxi ${inxi_args[*]:-}"
+    fi
+
+    if [[ -n ${path} ]]; then
+        dmesg_display_cmd="sudo dmesg -H &> ${path}/dmesg_${datetime}.log"
+        current_display_cmd="journalctl -b 0 &> ${path}/current_${datetime}.log"
+        lastboot_display_cmd="journalctl -b -1 &> ${path}/lastboot_${datetime}.log"
+        if [[ ${inxi_pcie} == true ]]; then
+            inxi_display_cmd="sudo inxi ${inxi_args[*]:-} &> ${path}/inxi_${datetime}.log"
+        else
+            inxi_display_cmd="inxi ${inxi_args[*]:-} &> ${path}/inxi_${datetime}.log"
+        fi
+    fi
+
+    if [[ ${dmesg} == true ]]; then
+        execute_task "Saving dmesg ring buffer logs" "${dmesg_display_cmd}" "allow" logsSaveDmesg
+    fi
+
+    if [[ ${current} == true ]]; then
+        execute_task "Saving current boot journal logs" "${current_display_cmd}" "allow" logsSaveCurrent
+    fi
+
+    if [[ ${lastboot} == true ]]; then
+        execute_task "Saving previous boot journal logs" "${lastboot_display_cmd}" "allow" logsSaveLastboot
+    fi
+
+    if [[ ${inxi} == true ]]; then
+        execute_task "Saving inxi system configuration info" "${inxi_display_cmd}" "allow" logsRunInxi "${inxi_args[@]}"
+    fi
 }
 
 logsCleanup() {
-  # Triggered automatically in case of an unexpected error.
-  echo "Cleaned up after <logs>" # todo - possibly do nothing
-  exit 2
+    # Triggered automatically in case of an unexpected error.
+    if [[ -n ${path} ]]; then
+        printf "Cleaned up after <logs>\n"
+    fi
 }
 
+cleanup() {
+    logsCleanup
+}
