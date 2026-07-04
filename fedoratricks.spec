@@ -4,7 +4,7 @@
 %global debug_package %{nil}
 
 Name:       fedoratricks
-Version:    0.1
+Version:    0.2
 Release:    1%{?dist}
 Summary:    A is a collection of scripts to make the life of a beginner Fedora Linux user a little bit easier. We aspire to not spoon-feed the solution, but to also teach what these tools do for you.
 License:    MIT
@@ -35,6 +35,8 @@ install -D -m 0755 %{name}.sh "%{buildroot}%{_bindir}/%{name}"
 %{_datarootdir}/%{name}/*
 
 %changelog
+* Sat Jun 6 2026 Rhea Gustavsson <contact@rhea.dev> 0.2-1
+- imshubhamsocial: modularize test harness; add multimedia, nvidia and secureboot; refactor logs
 * Sat Jun 6 2026 Rhea Gustavsson <contact@rhea.dev> 0.1-1
 - init - basic framework that does nothing
 
