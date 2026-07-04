@@ -291,43 +291,11 @@ check_and_install_rpmfusion() {
     fi
 }
 
-# 7.5. Check if inxi is installed, prompt to install if not
-install_inxi() {
-    printf "\nInstalling inxi:\n"
-    if [[ ${EUID} -eq 0 ]]; then
-        echo "$ dnf install -y inxi"
-        dnf install -y inxi
-    elif command -v pkexec >/dev/null 2>&1; then
-        echo "$ pkexec dnf install -y inxi"
-        pkexec dnf install -y inxi
-    else
-        echo "$ sudo dnf install -y inxi"
-        sudo dnf install -y inxi
-    fi
-}
-
-check_and_install_inxi() {
+# 7.5. Check if inxi is installed
+check_inxi() {
     if ! command -v inxi >/dev/null 2>&1; then
         printf "\n\e[1;34minxi is required but not installed.\e[0m\n" >&2
-        printf "\e[1;34mWould you like to install it now?\e[0m\n" >&2
-        local response
-        if read -r -p "Is this ok [y/N]: " response; then
-            if [[ ${response} =~ ^([yY][eE][sS]|[yY])$ ]]; then
-                # Dynamically append this task to the existing execution sequence
-                if [[ -n ${TASK_TOTAL:-} ]]; then
-                    TASK_TOTAL=$((TASK_TOTAL + 1))
-                else
-                    init_tasks 1
-                fi
-                execute_task "Installing inxi" "dnf install -y inxi" "allow" install_inxi
-            else
-                printf "Error: inxi is required to proceed.\n" >&2
-                exit 1
-            fi
-        else
-            printf "\nError: inxi is required to proceed.\n" >&2
-            exit 1
-        fi
+        exit 1
     fi
 }
 

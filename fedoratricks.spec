@@ -17,6 +17,7 @@ Provides:   fedoratricks
 
 Requires:   bash
 Requires:   curl
+Requires:   inxi
 
 %description
 A is a collection of scripts to make the life of a beginner Fedora Linux user a little bit easier. We aspire to not spoon-feed the solution, but to also teach what these tools do for you.
