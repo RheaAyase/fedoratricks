@@ -23,18 +23,37 @@ sudo dnf install fedoratricks
 
 ### Documentation
 
-Complete usage documentation, options, help guides, and command examples are now available in the [Fedoratricks Command Reference](file:///var/home/imshubhamsocial/Downloads/Web/fedoratricks/docs/docs.md).
+Complete usage documentation, options, help guides, and command examples are available in the [Fedoratricks Command Reference](docs/docs.md).
 
 For quick reference, the general command syntax is:
 ```bash
 fedoratricks <command> <action> [options] [targets...]
 ```
 
+After installing, you can also read the documentation directly in your terminal:
+```bash
+man fedoratricks
+```
+
+The man page source is written in [scdoc](https://git.sr.ht/~sircmpwn/scdoc) format and lives at `docs/fedoratricks.1.scd`. To build it locally:
+
+```bash
+# Fedora
+sudo dnf install scdoc
+
+# macOS
+brew install scdoc
+
+# Build
+scdoc < docs/fedoratricks.1.scd > docs/fedoratricks.1
+man ./docs/fedoratricks.1
+```
+
 ---
 
 ### Developer Guide
 
-If you are a developer looking to contribute, understand the transaction/rollback system, or write new command modules, check out the [Fedoratricks Developer Guide](file:///var/home/imshubhamsocial/Downloads/Web/fedoratricks/docs/developer.md).
+If you are a developer looking to contribute, understand the transaction/rollback system, or write new command modules, check out the [Fedoratricks Developer Guide](docs/developer.md).
 
 ---
 
