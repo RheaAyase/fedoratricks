@@ -170,16 +170,19 @@ Examples:
 ---
 
 ### 5. `logs`
-Gathers and saves system diagnostic logs. By default, logs print directly to the terminal so they can be piped/grepped. If `-f` is specified, logs are saved to files in the target directory.
+Gathers and saves system diagnostic logs. By default, logs print directly to the terminal so they can be piped/grepped. If no flags are provided, it automatically saves all logs (equivalent to `-a -i --system`) into a timestamped directory at `~/logs-<timestamp>`. If `-f` is specified, logs are saved to files in the target directory.
 
 #### Help Text
 ```text
 Command Usage: fedoratricks logs [options]
 
+If no flags are specified, logs defaults to:
+  fedoratricks logs -a -i --system -f ~/logs-<timestamp>
+
 Options:
   -h|--help          Print the help text and exit.
   -a|--all           Save dmesg as well as journal current and last boot.
-  -0|--current       Save the current boot logs (default).
+  -0|--current       Save the current boot logs.
   -1|--lastboot      Save the previous boot logs.
   -d|--dmesg         Save the dmesg output.
   -f|--file <path>   File path where to save the logs. If not specified, logs print to terminal.
