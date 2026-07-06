@@ -126,6 +126,28 @@ logsParseArgs() {
 }
 
 logsSaveDmesg() {
+    local dmesg_allowed=true
+    if [[ ${EUID} -eq 0 ]]; then
+        if ! dmesg &>/dev/null; then
+            dmesg_allowed=false
+        fi
+    else
+        if ! sudo dmesg &>/dev/null; then
+            dmesg_allowed=false
+        fi
+    fi
+
+    if [[ ${dmesg_allowed} == false ]]; then
+        printf "        Notice: dmesg access not permitted. Falling back to journalctl -k\n" >&2
+        if [[ -n ${path} ]]; then
+            printf "        Saving dmesg to %s/dmesg_%s.log\n" "${path}" "${datetime}" >&2
+            run_cmd_eval "journalctl -k &> '${path}/dmesg_${datetime}.log'"
+        else
+            run_cmd journalctl -k
+        fi
+        return 0
+    fi
+
     if [[ -n ${path} ]]; then
         printf "        Saving dmesg to %s/dmesg_%s.log\n" "${path}" "${datetime}" >&2
         if [[ ${EUID} -eq 0 ]]; then
@@ -192,8 +214,9 @@ logsExecute() {
     export FEDORATRICKS_REDIRECT_OUTPUT="false"
     export FEDORATRICKS_SILENT_SUMMARY="true"
 
-    # If writing to files, print start header to stderr
+    # If writing to files, ensure output directory exists and print start header to stderr
     if [[ -n ${path} ]]; then
+        mkdir -p "${path}"
         printf "  \e[1;34mGathering system logs and diagnostics...\e[0m\n" >&2
     fi
 

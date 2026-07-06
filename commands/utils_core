@@ -250,46 +250,6 @@ run_initramfs_rebuild() {
     fi
 }
 
-# 7. Check if RPM Fusion repositories are installed and enabled, prompt to install if not
-check_and_install_rpmfusion() {
-    log_print "  Verifying RPM Fusion repositories...\n"
-    local active_repos
-
-    if ! active_repos=$(dnf repolist --enabled 2>/dev/null); then
-        printf "Error: Failed to fetch dnf repolist.\n" >&2
-        exit 1
-    fi
-
-    local missing=false
-    if ! grep -qi "rpmfusion-free" <<<"${active_repos}"; then
-        missing=true
-    fi
-    if ! grep -qi "rpmfusion-nonfree" <<<"${active_repos}"; then
-        missing=true
-    fi
-    if [[ ${missing} == true ]]; then
-        printf "\n\e[1;34mRPM Fusion (Free & Non-Free) repositories are required but not enabled.\e[0m\n" >&2
-        printf "\e[1;34mWould you like to install and enable them now?\e[0m\n" >&2
-        local response
-        if read -r -p "Is this ok [y/N]: " response; then
-            if [[ ${response} =~ ^([yY][eE][sS]|[yY])$ ]]; then
-                # Dynamically append this task to the existing execution sequence
-                if [[ -n ${TASK_TOTAL:-} ]]; then
-                    TASK_TOTAL=$((TASK_TOTAL + 1))
-                else
-                    init_tasks 1
-                fi
-                execute_task "Installing RPM Fusion repositories" "fedoratricks rpmfusion install" "allow" setupRpmfusionConfig install
-            else
-                printf "Error: RPM Fusion repositories are required to proceed.\n" >&2
-                exit 1
-            fi
-        else
-            printf "\nError: RPM Fusion repositories are required to proceed.\n" >&2
-            exit 1
-        fi
-    fi
-}
 
 # 7.5. Check if inxi is installed, prompt to install if not
 install_inxi() {
