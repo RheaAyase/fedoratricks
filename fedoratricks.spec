@@ -13,6 +13,7 @@ Source:     https://github.com/RheaAyase/fedoratricks/releases/latest/download/f
 
 BuildArch:  noarch
 BuildRequires: shellcheck
+BuildRequires: scdoc
 Provides:   fedoratricks
 
 Requires:   bash
@@ -26,13 +27,18 @@ A is a collection of scripts to make the life of a beginner Fedora Linux user a 
 %setup -C
 shellcheck %{name}.sh commands/*
 
+%build
+scdoc < docs/%{name}.1.scd > docs/%{name}.1
+
 %install
 install -D -m 0644 commands/* -t "%{buildroot}%{_datarootdir}/%{name}/"
 install -D -m 0755 %{name}.sh "%{buildroot}%{_bindir}/%{name}"
+install -D -m 0644 docs/%{name}.1 "%{buildroot}%{_mandir}/man1/%{name}.1"
 
 %files
 %{_bindir}/%{name}
 %{_datarootdir}/%{name}/*
+%{_mandir}/man1/%{name}.1*
 
 %changelog
 * Sat Jun 6 2026 Rhea Gustavsson <contact@rhea.dev> 0.2-1
