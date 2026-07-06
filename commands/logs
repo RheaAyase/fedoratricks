@@ -147,7 +147,6 @@ logsSaveDmesg() {
         fi
         return 0
     fi
-
     if [[ -n ${path} ]]; then
         printf "        Saving dmesg to %s/dmesg_%s.log\n" "${path}" "${datetime}" >&2
         if [[ ${EUID} -eq 0 ]]; then
