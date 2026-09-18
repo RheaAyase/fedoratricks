@@ -5,7 +5,7 @@
 
 Name:       fedoratricks
 Version:    0.3
-Release:    1%{?dist}
+Release:    2%{?dist}
 Summary:    A is a collection of scripts to make the life of a beginner Fedora Linux user a little bit easier. We aspire to not spoon-feed the solution, but to also teach what these tools do for you.
 License:    MIT
 URL:        https://github.com/RheaAyase/fedoratricks
@@ -41,6 +41,9 @@ install -D -m 0644 docs/%{name}.1 "%{buildroot}%{_mandir}/man1/%{name}.1"
 %{_mandir}/man1/%{name}.1*
 
 %changelog
+* Sat Jun 6 2026 imshubhamsocial <imshubhamsocial+github@gmail.com> 0.3-2
+- Require root/sudo for execution and resolve user home/ownership for logs
+- Integrate dracut into --config flag and skip for legacy NVIDIA GPUs
 * Sat Jun 6 2026 Rhea Gustavsson <contact@rhea.dev> 0.2-1
 - iahmedgamal: add man-pages
 * Sat Jun 6 2026 Rhea Gustavsson <contact@rhea.dev> 0.2-1

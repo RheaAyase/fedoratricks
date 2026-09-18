@@ -137,6 +137,11 @@ nvidiaSetupRebarConfig() {
 nvidiaSetupEarlyKmsConfig() {
     local action="$1"
     if [[ ${action} == "enable" || ${action} == "install" ]]; then
+        if is_nvidia_legacy_or_1000_series; then
+            track_noop "Configure NVIDIA Early KMS dracut option" "SKIPPED (NVIDIA 1000 series or earlier)"
+            return 0
+        fi
+
         if [[ -f ${dracut_conf_file} ]] && grep -q "force_drivers" "${dracut_conf_file}"; then
             # Already set up, do nothing for earlykms
             track_noop "Configure NVIDIA Early KMS dracut option" "SUCCESS (Already configured)"
@@ -149,7 +154,9 @@ nvidiaSetupEarlyKmsConfig() {
     else
         if [[ -f ${dracut_conf_file} ]]; then
             run_cmd rm -f "${dracut_conf_file}"
-            NEEDS_INITRAMFS=true
+            if ! is_nvidia_legacy_or_1000_series; then
+                NEEDS_INITRAMFS=true
+            fi
         else
             track_noop "Remove NVIDIA Early KMS dracut config: ${dracut_conf_file}" "SUCCESS (Already removed)"
         fi
@@ -189,9 +196,21 @@ nvidiaSetupConfig() {
     if [[ ${action} == "disable" || ${action} == "remove" ]]; then
         if [[ -f ${conf_file} ]]; then
             run_cmd rm -f "${conf_file}"
-            NEEDS_INITRAMFS=true
+            if ! is_nvidia_legacy_or_1000_series; then
+                NEEDS_INITRAMFS=true
+            fi
         else
             track_noop "Remove NVIDIA sleep config file: ${conf_file}" "SUCCESS (Already removed)"
+        fi
+    fi
+
+    # Rebuild initramfs image if required by configuration changes
+    if [[ ${NEEDS_INITRAMFS:-false} == true ]]; then
+        if is_nvidia_legacy_or_1000_series; then
+            track_noop "Rebuild initramfs image" "SKIPPED (NVIDIA 1000 series or earlier)"
+        else
+            printf "        Rebuilding initramfs image...\n"
+            regenerate_initramfs
         fi
     fi
 }
@@ -295,15 +314,7 @@ nvidiaExecute() {
             "allow"
     fi
 
-    # 3. Register Initramfs Rebuild Task if config was enabled
-    if [[ ${config_enabled} == true ]]; then
-        register_task "Rebuilding initramfs image" \
-            "run_initramfs_rebuild install" \
-            "run_initramfs_rebuild remove" \
-            "skip"
-    fi
-
-    # 4. Run the transaction!
+    # 3. Run the transaction!
     run_transaction "${action}"
 }
 

@@ -130,14 +130,8 @@ logsParseArgs() {
 
 logsSaveDmesg() {
     local dmesg_allowed=true
-    if [[ ${EUID} -eq 0 ]]; then
-        if ! dmesg &>/dev/null; then
-            dmesg_allowed=false
-        fi
-    else
-        if ! sudo dmesg &>/dev/null; then
-            dmesg_allowed=false
-        fi
+    if ! dmesg &>/dev/null; then
+        dmesg_allowed=false
     fi
 
     if [[ ${dmesg_allowed} == false ]]; then
@@ -152,17 +146,9 @@ logsSaveDmesg() {
     fi
     if [[ -n ${path} ]]; then
         printf "        Saving dmesg to %s/dmesg_%s.log\n" "${path}" "${datetime}" >&2
-        if [[ ${EUID} -eq 0 ]]; then
-            run_cmd_eval "dmesg -H &> '${path}/dmesg_${datetime}.log'"
-        else
-            run_cmd_eval "sudo dmesg -H &> '${path}/dmesg_${datetime}.log'"
-        fi
+        run_cmd_eval "dmesg -H &> '${path}/dmesg_${datetime}.log'"
     else
-        if [[ ${EUID} -eq 0 ]]; then
-            run_cmd dmesg -H
-        else
-            run_cmd sudo dmesg -H
-        fi
+        run_cmd dmesg -H
     fi
 }
 
@@ -188,33 +174,26 @@ logsRunInxi() {
     local flags=("$@")
     if [[ -n ${path} ]]; then
         printf "        Saving inxi output (flags: %s) to %s/inxi_%s.log\n" "${flags[*]}" "${path}" "${datetime}" >&2
-        if [[ ${inxi_pcie} == true ]]; then
-            if [[ ${EUID} -eq 0 ]]; then
-                run_cmd_eval "inxi ${flags[*]} &> '${path}/inxi_${datetime}.log'"
-            else
-                run_cmd_eval "sudo inxi ${flags[*]} &> '${path}/inxi_${datetime}.log'"
-            fi
-        else
-            run_cmd_eval "inxi ${flags[*]} &> '${path}/inxi_${datetime}.log'"
-        fi
+        run_cmd_eval "inxi ${flags[*]} &> '${path}/inxi_${datetime}.log'"
     else
-        if [[ ${inxi_pcie} == true ]]; then
-            if [[ ${EUID} -eq 0 ]]; then
-                run_cmd inxi "${flags[@]}"
-            else
-                run_cmd sudo inxi "${flags[@]}"
-            fi
-        else
-            run_cmd inxi "${flags[@]}"
-        fi
+        run_cmd inxi "${flags[@]}"
     fi
 }
 
 logsExecute() {
+    check_root
+    local user_home
+    user_home=$(get_real_user_home)
+
     if [[ $# -eq 0 ]]; then
-        logsParseArgs "-a" "-i" "--system" "-f" "${HOME}/logs-${datetime}"
+        logsParseArgs "-a" "-i" "--system" "-f" "${user_home}/logs-${datetime}"
     else
         logsParseArgs "$@"
+    fi
+
+    # Expand literal ~ if path starts with ~
+    if [[ "${path}" == "~"* ]]; then
+        path="${user_home}${path#\~}"
     fi
 
     export FEDORATRICKS_REDIRECT_OUTPUT="false"
@@ -223,6 +202,7 @@ logsExecute() {
     # If writing to files, ensure output directory exists and print start header to stderr
     if [[ -n ${path} ]]; then
         mkdir -p "${path}"
+        chown_to_real_user "${path}"
         printf "  \e[1;34mGathering system logs and diagnostics...\e[0m\n" >&2
     fi
 
@@ -240,7 +220,7 @@ logsExecute() {
     init_tasks "${task_count}"
 
     # Set up command display strings depending on file saving path
-    local dmesg_display_cmd="sudo dmesg -H"
+    local dmesg_display_cmd="dmesg -H"
     local current_display_cmd="journalctl -b 0"
     local lastboot_display_cmd="journalctl -b -1"
     local inxi_args=()
@@ -256,19 +236,12 @@ logsExecute() {
         fi
     fi
     local inxi_display_cmd="inxi ${inxi_args[*]:-}"
-    if [[ ${inxi_pcie} == true ]]; then
-        inxi_display_cmd="sudo inxi ${inxi_args[*]:-}"
-    fi
 
     if [[ -n ${path} ]]; then
-        dmesg_display_cmd="sudo dmesg -H &> ${path}/dmesg_${datetime}.log"
+        dmesg_display_cmd="dmesg -H &> ${path}/dmesg_${datetime}.log"
         current_display_cmd="journalctl -b 0 &> ${path}/current_${datetime}.log"
         lastboot_display_cmd="journalctl -b -1 &> ${path}/lastboot_${datetime}.log"
-        if [[ ${inxi_pcie} == true ]]; then
-            inxi_display_cmd="sudo inxi ${inxi_args[*]:-} &> ${path}/inxi_${datetime}.log"
-        else
-            inxi_display_cmd="inxi ${inxi_args[*]:-} &> ${path}/inxi_${datetime}.log"
-        fi
+        inxi_display_cmd="inxi ${inxi_args[*]:-} &> ${path}/inxi_${datetime}.log"
     fi
 
     if [[ ${dmesg} == true ]]; then
@@ -286,11 +259,17 @@ logsExecute() {
     if [[ ${inxi} == true ]]; then
         execute_task "Saving inxi system configuration info" "${inxi_display_cmd}" "allow" logsRunInxi "${inxi_args[@]}"
     fi
+
+    if [[ -n ${path} && -d ${path} ]]; then
+        chown_to_real_user "${path}"
+        printf "  \e[1;32mSaved logs to: %s\e[0m\n" "${path}" >&2
+    fi
 }
 
 logsCleanup() {
     # Triggered automatically in case of an unexpected error.
     if [[ -n ${path} ]]; then
+        chown_to_real_user "${path}"
         printf "Cleaned up after <logs>\n"
     fi
 }

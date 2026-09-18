@@ -21,14 +21,16 @@ This document is for developers who want to understand the inner workings of the
 
 ---
 
-## Privilege Escalation (`run_cmd`, `run_cmd_eval`)
+## Root / Sudo Execution Model (`run_cmd`, `run_cmd_eval`)
 
-To avoid running the entire application as root, the framework uses targeted escalation helpers:
+`fedoratricks` must be executed with root/sudo privileges (e.g. `sudo fedoratricks <command>`). If run without sudo, execution is halted immediately and commands are never executed.
 
-* **`run_cmd <command> [args...]`**: Evaluates arguments as a command. If the command belongs to a list of root-requiring utilities (like `dnf`, `systemctl`, `sed`, `touch`, `rm`, `mkdir`, `dracut`, `kmodgenca`, `mokutil`, `journalctl`), it prepends `sudo` automatically for non-root users.
-* **`run_cmd_eval "<command_string>"`**: Runs eval on a command string (essential for commands using redirections or pipes, like `dmesg -H &> file.log`). It automatically prepends `sudo` to the start of the string if executed by a non-root user.
+Within the framework, all tasks and commands execute directly under root privileges:
 
-Both utilities format the commands for the user-facing log output (replaces `pkexec` with `sudo` and wraps redirects with `sudo sh -c`).
+* **`run_cmd <command> [args...]`**: Evaluates arguments as a command.
+* **`run_cmd_eval "<command_string>"`**: Runs eval on a command string (useful for commands using redirections or pipes, like `dmesg -H &> file.log`).
+
+Both utilities format command display cleanly for user-facing output.
 
 ---
 
@@ -91,7 +93,7 @@ setupCustomBanner() {
             return 0
         fi
 
-        # Modify the system file (run_cmd_eval handles sudo escalation)
+        # Modify the system file
         run_cmd_eval "printf 'Fedoratricks Custom Banner\n' > '${target_file}'"
     else
         # Revert changes by clearing out the custom line
@@ -126,13 +128,13 @@ myconfigExecute() {
 
 #### 3. Sample Execution Output
 
-When a user runs `fedoratricks myconfig install`, the console output will look like this:
+When a user runs `sudo fedoratricks myconfig install`, the console output will look like this:
 
 ```text
   Managing custom configurations...
 
   [1/1] RUNNING: Configure custom issue banner
-        sudo sh -c "printf 'Fedoratricks Custom Banner\n' > '/etc/issue'"
+        printf 'Fedoratricks Custom Banner\n' > '/etc/issue'
 
   Execution Summary:
     [1/1] PASSED: Configure custom issue banner
