@@ -85,11 +85,7 @@ setupRpmfusionPackages() {
         printf "        Applying RPM Fusion configurations for Fedora %s:\n" "${fedora_ver}"
         if rpm -q rpmfusion-free-release rpmfusion-nonfree-release &>/dev/null; then
             # Silently remove packages first if registered as installed but files are missing
-            if [[ ${EUID} -eq 0 ]]; then
-                dnf remove -y rpmfusion-free-release rpmfusion-nonfree-release &>/dev/null || true
-            else
-                sudo dnf remove -y rpmfusion-free-release rpmfusion-nonfree-release &>/dev/null || true
-            fi
+            dnf remove -y rpmfusion-free-release rpmfusion-nonfree-release &>/dev/null || true
         fi
         run_cmd dnf install -y "${free_url}" "${nonfree_url}" || return $?
         # RPM Fusion officially recommends updating AppStream metadata after install

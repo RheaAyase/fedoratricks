@@ -73,13 +73,13 @@ securebootEnable() {
     run_cmd dnf install -y kmodtool akmods mokutil openssl
 
     # Skip enrollment completely if the key is already enrolled in the UEFI MOK database
-    if [[ -f ${cert_path} ]] && sudo mokutil --test-key "${cert_path}" 2>&1 | grep -q "is already enrolled"; then
+    if [[ -f ${cert_path} ]] && mokutil --test-key "${cert_path}" 2>&1 | grep -q "is already enrolled"; then
         printf "Secure Boot custom key is already enrolled in UEFI MOK database. Skipping enrollment.\n"
         return 0
     fi
 
     # Skip enrollment if a key is already staged for import on next reboot
-    if [[ -n "$(sudo mokutil --list-new 2>/dev/null)" ]]; then
+    if [[ -n "$(mokutil --list-new 2>/dev/null)" ]]; then
         printf "Secure Boot custom key is already staged for enrollment on next reboot. Skipping staging.\n"
         return 0
     fi
@@ -98,7 +98,7 @@ securebootEnable() {
     fi
 
     # Double check if enrolled before prompting for import password
-    if sudo mokutil --test-key "${cert_path}" 2>&1 | grep -q "is already enrolled"; then
+    if mokutil --test-key "${cert_path}" 2>&1 | grep -q "is already enrolled"; then
         printf "Secure Boot custom key is already enrolled in UEFI MOK database.\n"
         return 0
     fi

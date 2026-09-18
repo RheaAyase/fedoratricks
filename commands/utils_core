@@ -14,10 +14,41 @@ declare -a TASK_RESULTS=()
 declare -a TRANSACTION_ROLLBACK_STACK=()
 NEEDS_INITRAMFS=false
 
+get_real_user() {
+    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        echo "${SUDO_USER}"
+    else
+        logname 2>/dev/null || id -un
+    fi
+}
+
+get_real_user_home() {
+    local real_user
+    real_user=$(get_real_user)
+    if [[ -n "${real_user}" && "${real_user}" != "root" ]]; then
+        local user_home
+        user_home="$(getent passwd "${real_user}" 2>/dev/null | cut -d: -f6 || true)"
+        if [[ -n "${user_home}" && -d "${user_home}" ]]; then
+            echo "${user_home}"
+            return 0
+        fi
+    fi
+    echo "${HOME}"
+}
+
+chown_to_real_user() {
+    local target_path="$1"
+    local real_user
+    real_user=$(get_real_user)
+    if [[ -n "${real_user:-}" && "${real_user}" != "root" && -e "${target_path}" ]]; then
+        chown -R "${real_user}:" "${target_path}" &>/dev/null || true
+    fi
+}
+
 # Global logging variables
 CURRENT_LOG_MODE="USER"
 LOG_FILE="/var/log/fedoratricks"
-FALLBACK_LOG_DIR="${HOME}/.local/share/fedoratricks"
+FALLBACK_LOG_DIR="$(get_real_user_home)/.local/share/fedoratricks"
 FALLBACK_LOG_FILE="${FALLBACK_LOG_DIR}/fedoratricks.log"
 export FEDORATRICKS_REDIRECT_OUTPUT="true"
 
@@ -26,23 +57,12 @@ ensure_log_file_setup() {
 
     # If it is a directory from a previous run, remove it
     if [[ -d "${log_file}" ]]; then
-        if [[ ${EUID} -eq 0 ]]; then
-            rm -rf "${log_file}" &>/dev/null || true
-        else
-            sudo rm -rf "${log_file}" &>/dev/null || true
-        fi
+        rm -rf "${log_file}" &>/dev/null || true
     fi
 
     if [[ ! -f "${log_file}" || ! -w "${log_file}" ]]; then
-        # Try to initialize it with root privileges via sudo/EUID check
-        if [[ ${EUID} -eq 0 ]]; then
-            touch "${log_file}" &>/dev/null || true
-            chmod 666 "${log_file}" &>/dev/null || true
-        else
-            # Only request sudo if we actually need to create or chmod it
-            sudo touch "${log_file}" &>/dev/null || true
-            sudo chmod 666 "${log_file}" &>/dev/null || true
-        fi
+        touch "${log_file}" &>/dev/null || true
+        chmod 666 "${log_file}" &>/dev/null || true
     fi
 }
 
@@ -52,16 +72,9 @@ get_active_log_file() {
         echo "${log_file}"
     else
         mkdir -p "${FALLBACK_LOG_DIR}" 2>/dev/null || true
-        # Clean up fallback ownership if it was changed to root in a previous run
-        if [[ -f "${FALLBACK_LOG_FILE}" && ! -w "${FALLBACK_LOG_FILE}" ]]; then
-            if [[ ${EUID} -eq 0 ]]; then
-                # If running as root, we can just chown directly
-                chown "$(logname 2>/dev/null || echo "${SUDO_USER:-$(whoami)}")" "${FALLBACK_LOG_FILE}" &>/dev/null || true
-                chmod 664 "${FALLBACK_LOG_FILE}" &>/dev/null || true
-            else
-                sudo chown "$(id -u):$(id -g)" "${FALLBACK_LOG_FILE}" &>/dev/null || true
-                sudo chmod 664 "${FALLBACK_LOG_FILE}" &>/dev/null || true
-            fi
+        chown_to_real_user "${FALLBACK_LOG_DIR}"
+        if [[ -f "${FALLBACK_LOG_FILE}" ]]; then
+            chmod 664 "${FALLBACK_LOG_FILE}" &>/dev/null || true
         fi
         echo "${FALLBACK_LOG_FILE}"
     fi
@@ -190,17 +203,17 @@ check_dnf() {
     fi
 }
 
-# 3. Block running with root privileges on startup
-warn_root_execution() {
-    if [[ ${EUID} -eq 0 ]]; then
-        printf "\e[1;31mError: Running fedoratricks directly as root/sudo is not allowed for security reasons.\e[0m\n" >&2
-        printf "\e[1;31mPlease run the command as a regular user; individual tasks will request sudo privileges as needed.\e[0m\n" >&2
+# 3. Require running with root/sudo privileges
+check_root() {
+    if [[ ${EUID} -ne 0 ]]; then
+        printf "\e[1;31mError: fedoratricks must be run with root/sudo privileges.\e[0m\n" >&2
+        printf "\e[1;31mPlease run the command with sudo: sudo fedoratricks <command>\e[0m\n" >&2
         exit 1
     fi
 }
 
-check_root() {
-    warn_root_execution
+warn_root_execution() {
+    check_root
 }
 
 # 4. Check if the system is OSTree-based
@@ -224,7 +237,7 @@ validate_environment() {
     check_fedora
     block_ostree "${cmd_name}"
     check_dnf
-    warn_root_execution
+    check_root
 }
 
 # 6. Rebuild initramfs using dracut
@@ -459,23 +472,8 @@ cleanup() {
 
 format_cmd_display() {
     local cmd_str="$1"
-    local pkexec_regex='^pkexec[[:space:]]+(.*)'
-    local system_regex='^(dnf|systemctl|sed|touch|rm|mkdir|dracut|kmodgenca|mokutil|journalctl)([[:space:]]+.*|$)'
-    local redirect_regex='^(printf|echo)[[:space:]]+.*[>]+[[:space:]]*['\''"]?/(etc|usr|var|run)/.*'
-
-    # Replace pkexec with sudo
-    if [[ ${cmd_str} =~ ${pkexec_regex} ]]; then
-        cmd_str="sudo ${BASH_REMATCH[1]}"
-    fi
-    # Prepend sudo to system commands
-    if [[ ${cmd_str} =~ ${system_regex} ]]; then
-        cmd_str="sudo ${cmd_str}"
-    # For printf redirecting to system files, wrap in sudo sh -c
-    elif [[ ${cmd_str} =~ ${redirect_regex} ]]; then
-        # Escape internal double quotes if any to prevent syntax breaking
-        local escaped_cmd_str=$(echo "${cmd_str}" | sed 's/"/\\"/g')
-        cmd_str="sudo sh -c \"${escaped_cmd_str}\""
-    fi
+    # Strip any redundant sudo or pkexec prefix
+    cmd_str=$(echo "${cmd_str}" | sed -E 's/^(sudo|pkexec)[[:space:]]+//')
     echo "${cmd_str}"
 }
 
@@ -526,7 +524,7 @@ resolve_rollback_dnf_cmd() {
     echo "${cmd}"
 }
 
-# Execute a command string or array with sudo if not already root
+# Execute a command string or array
 run_escalated() {
     # If in auto-rollback mode, intercept any DNF operations and replace with history undo
     if [[ "${CURRENT_LOG_MODE}" == "FEDORATRICKS" ]]; then
@@ -565,17 +563,6 @@ run_escalated() {
 
     if [[ $# -eq 1 ]]; then
         local cmd_str_esc="$1"
-        if [[ ${EUID} -ne 0 ]]; then
-            if [[ ! ${cmd_str_esc} =~ ^(sudo|pkexec)[[:space:]] ]]; then
-                local redirect_regex='^(printf|echo)[[:space:]]+.*[>]+[[:space:]]*['\''"]?/(etc|usr|var|run)/.*'
-                if [[ ${cmd_str_esc} =~ ${redirect_regex} ]]; then
-                    local escaped_cmd_str=$(echo "${cmd_str_esc}" | sed 's/"/\\"/g')
-                    cmd_str_esc="sudo sh -c \"${escaped_cmd_str}\""
-                else
-                    cmd_str_esc="sudo ${cmd_str_esc}"
-                fi
-            fi
-        fi
         tracked_cmd="${cmd_str_esc}"
 
         if [[ "${FEDORATRICKS_REDIRECT_OUTPUT:-}" == "true" ]]; then
@@ -588,25 +575,7 @@ run_escalated() {
             eval "${cmd_str_esc}" || exit_code=$?
         fi
     else
-        if [[ ${EUID} -ne 0 ]]; then
-            local system_commands="^(dnf|systemctl|sed|touch|rm|mkdir|dracut|kmodgenca|mokutil|journalctl)$"
-            if [[ "$1" =~ ${system_commands} ]]; then
-                tracked_cmd="sudo $*"
-                if [[ "${FEDORATRICKS_REDIRECT_OUTPUT:-}" == "true" ]]; then
-                    local log_file
-                    log_file=$(get_active_log_file)
-                    printf "[%s] [%s] [START_OUTPUT] ===\n" "$(date '+%Y-%m-%d %H:%M:%S')" "${CURRENT_LOG_MODE}" >>"${log_file}" 2>/dev/null || true
-                    sudo "$@" >>"${log_file}" 2>&1 || exit_code=$?
-                    printf "[%s] [%s] [END_OUTPUT] ===\n" "$(date '+%Y-%m-%d %H:%M:%S')" "${CURRENT_LOG_MODE}" >>"${log_file}" 2>/dev/null || true
-                else
-                    sudo "$@" || exit_code=$?
-                fi
-                log_transaction_event "COMPLETED" "Exit Code: ${exit_code}"
-                track_command_execution "${tracked_cmd}" "${exit_code}" "${pre_dnf_id}"
-                return ${exit_code}
-            fi
-        fi
-
+        tracked_cmd="$*"
         if [[ "${FEDORATRICKS_REDIRECT_OUTPUT:-}" == "true" ]]; then
             local log_file
             log_file=$(get_active_log_file)

@@ -86,8 +86,15 @@ detect_intel_gen() {
     echo "${gen}"
 }
 
+NVIDIA_DETECTED_GEN=""
+
 # 3. Detect NVIDIA GPU generation
 detect_nvidia_gen() {
+    if [[ -n "${NVIDIA_DETECTED_GEN:-}" ]]; then
+        echo "${NVIDIA_DETECTED_GEN}"
+        return 0
+    fi
+
     log_print "        Detecting NVIDIA GPU generation...\n"
 
     local gpu_info=""
@@ -101,13 +108,13 @@ detect_nvidia_gen() {
 
     local gen="unknown"
     # Turing, Ampere, Ada, Blackwell and newer (RTX 20+, GTX 16xx)
-    if grep -qiE 'RTX|GTX 16[0-9][0-9]|MX[2345][0-9][0-9]|T[0-9][0-9][0-9]|A[0-9][0-9][0-9][0-9]' <<<"${gpu_info}"; then
+    if grep -qiE 'RTX|GTX[[:space:]]*16[0-9][0-9]|MX[2345][0-9][0-9]|T[0-9][0-9][0-9]|A[0-9][0-9][0-9][0-9]' <<<"${gpu_info}"; then
         gen="current"
-    # Maxwell & Pascal (GTX 800/900/10xx)
-    elif grep -qiE 'GTX 10[0-9][0-9]|GTX 9[0-9][0-9]|GTX 8[0-9][0-9]|MX1[0-9][0-9]|Quadro P|Quadro M|Pascal|Maxwell' <<<"${gpu_info}"; then
+    # Maxwell & Pascal (GT/GTX 10xx, 9xx, 8xx, Titan, Quadro P/M)
+    elif grep -qiE 'GT[X]?[[:space:]]*10[0-9][0-9]|GT[X]?[[:space:]]*9[0-9][0-9]|GT[X]?[[:space:]]*8[0-9][0-9]|MX1[0-9][0-9]|Quadro[[:space:]]*[PM]|Pascal|Maxwell|TITAN' <<<"${gpu_info}"; then
         gen="580xx"
-    # Kepler (GTX 600/700)
-    elif grep -qiE 'GTX 7[0-9][0-9]|GTX 6[0-9][0-9]|Quadro K|Kepler' <<<"${gpu_info}"; then
+    # Kepler & older (GT/GTX 7xx, 6xx, Quadro K, etc.)
+    elif grep -qiE 'GT[X]?[[:space:]]*[4-7][0-9][0-9]|Quadro[[:space:]]*K|Kepler|Fermi' <<<"${gpu_info}"; then
         gen="470xx"
     fi
 
@@ -118,5 +125,13 @@ detect_nvidia_gen() {
     fi
 
     log_print "          Detected family: \e[1m%s\e[0m\n" "${gen}"
+    NVIDIA_DETECTED_GEN="${gen}"
     echo "${gen}"
+}
+
+# 4. Check if the NVIDIA GPU is 1000 series or earlier (Pascal, Maxwell, Kepler, etc.)
+is_nvidia_legacy_or_1000_series() {
+    local gen
+    gen=$(detect_nvidia_gen 2>/dev/null || echo "unknown")
+    [[ "${gen}" == "580xx" || "${gen}" == "470xx" ]]
 }
