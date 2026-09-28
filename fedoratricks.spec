@@ -4,8 +4,8 @@
 %global debug_package %{nil}
 
 Name:       fedoratricks
-Version:    0.3
-Release:    2%{?dist}
+Version:    0.4
+Release:    1%{?dist}
 Summary:    A is a collection of scripts to make the life of a beginner Fedora Linux user a little bit easier. We aspire to not spoon-feed the solution, but to also teach what these tools do for you.
 License:    MIT
 URL:        https://github.com/RheaAyase/fedoratricks
